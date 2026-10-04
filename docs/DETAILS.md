@@ -427,7 +427,7 @@ Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/RE
 **Hybrid K8V4 KV cache (engine 0.1.25, optional, PR #120):** `--kv k8v4` (`START-HERE.bat --setup --kv k8v4`) keeps
 the keys at 8 bits and stores the values as rotated 4-bit: 23% less KV memory than 8-bit, so more experts fit in
 VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the same needle results, prompts 2-5%
-slower. It does not stream its KV cache (KV streaming is on by default from 64K), so it pays off mostly on large
+slower. It streams with --kv-resident too, so it pays off mostly on large
 cards at long contexts.
 
 **Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
