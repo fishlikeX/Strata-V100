@@ -638,6 +638,87 @@ __global__ void __launch_bounds__(TK_T) block_topk_reg_kernel(const float* __res
     }
 }
 
+// ---- the same top-k with the keys read from memory on every radix pass, coalesced (block t + i * TK_T), so there is
+// no register limit (block_topk_reg_kernel holds at most TK_T * TK_PER blocks: ~135K cells on NVIDIA), then the cells
+// emitted in ascending chunks of TK_T blocks with two block scans each: ties to the lowest index, cells ascending -
+// block_topk_kernel's ids (checked on a 2080 Ti at 1K-250K, random and heavily tied scores).  Turing prefill takes it
+// above ~90K cells: 250K 12.8 -> 1.0 ms for 256 queries (block_topk_kernel's per-thread runs are uncoalesced).
+__global__ void __launch_bounds__(TK_T) block_topk_stream_kernel(const float* __restrict__ scores,
+                                                                 const int32_t* __restrict__ steps, int64_t max_blocks,
+                                                                 int64_t cap, int32_t* __restrict__ ids) {
+    __shared__ int hist[TK_T / 32][256];
+    __shared__ int s_warp[33];
+    __shared__ int s_digit, s_above;
+    const int64_t qi = blockIdx.x;
+    const int32_t* st = steps + qi * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    int32_t* out = ids + qi * cap;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    if (n_kv <= width) {
+        for (int64_t j = t; j < n_kv; j += TK_T) out[j] = (int32_t) j;
+        return;
+    }
+    const float* sc = scores + qi * max_blocks;
+    const int64_t nb = n_bid + 1;
+    auto weight = [&](int64_t b) -> int { return b < n_bid ? R : (int) (n_kv - n_bid * R); };
+    uint32_t prefix = 0;
+    int above = 0;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (int i = lane; i < 256; i += 32) hist[warp][i] = 0;
+        __syncwarp();
+        const uint32_t hi_mask = shift == 24 ? 0u : (0xffffffffu << (shift + 8));
+        for (int64_t b = t; b < nb; b += TK_T) {
+            const int w = weight(b);
+            if (w == 0) continue;
+            const uint32_t k = order_key(sc[b]);
+            if ((k & hi_mask) == (prefix & hi_mask)) atomicAdd(&hist[warp][(k >> shift) & 255], w);
+        }
+        __syncthreads();
+        if (t < 256) {
+            int s = 0;
+            for (int w2 = 0; w2 < TK_T / 32; ++w2) s += hist[w2][t];
+            hist[0][t] = s;
+        }
+        __syncthreads();
+        if (t == 0) {
+            int cum = above, d = 255;
+            for (; d > 0; --d) {
+                if (cum + hist[0][d] >= width) break;
+                cum += hist[0][d];
+            }
+            s_digit = d;
+            s_above = cum;
+        }
+        __syncthreads();
+        prefix |= (uint32_t) s_digit << shift;
+        above = s_above;
+        __syncthreads();
+    }
+    const uint32_t thr = prefix;
+    const int64_t eq_budget = width - above;
+    int64_t wbase = 0, eq_used = 0;
+    for (int64_t c0 = 0; c0 < nb && wbase < width; c0 += TK_T) {
+        const int64_t b = c0 + t;
+        int w = 0;
+        uint32_t k = 0;
+        if (b < nb) {
+            w = weight(b);
+            if (w) k = order_key(sc[b]);
+        }
+        const int gt = (w && k > thr) ? w : 0, eq = (w && k == thr) ? w : 0;
+        int eq_tot, sel_tot;
+        const int eq_before = block_excl_scan(eq, s_warp, eq_tot);
+        int64_t my_eq = eq_budget - eq_used - eq_before;
+        if (my_eq < 0) my_eq = 0;
+        if (my_eq > eq) my_eq = eq;
+        const int sel = gt + (int) my_eq;
+        const int64_t pos = wbase + block_excl_scan(sel, s_warp, sel_tot);
+        for (int c = 0; c < sel; ++c) out[pos + c] = (int32_t) (b * R + c);
+        wbase += sel_tot;
+        eq_used += eq_tot;
+    }
+}
+
 #if !defined(__HIPCC__)
 // ---- a query with more blocks than the register kernel holds (contexts past 4 * 1024 * TK_PER cells): the register
 // kernel's threads, per-warp histograms and warp scans, with each key read from memory again on every pass.  A
@@ -1255,6 +1336,17 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 #else
     constexpr int64_t kWideMinBlocks = 4608;   // RTX 3060: a prompt batch below ~18K cells is faster on the ref
     const bool too_small = reach > fit && active_blocks > 0 && active_blocks < kWideMinBlocks;
+    // Turing prefill above ~90K cells (22,528 blocks): the coalesced streaming kernel (STRATA_TOPK_STREAM=0: as before)
+    static const bool stream_on = [] {
+        const char* v = std::getenv("STRATA_TOPK_STREAM");
+        return v == nullptr || v[0] != '0';
+    }();
+    if (stream_on && !old && counted && reach > 22528 && s.idx_block == R && cap >= qsa_selection_width(kTopkMaxCells, s)) {
+        block_topk_stream_kernel<<<(unsigned) nq, TK_T, 0, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap, ids);
+        const cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk (stream): %s\n", cudaGetErrorString(e)); std::exit(1); }
+        return;
+    }
     if (old || too_small) {
 #endif
         qsa_block_topk_ref(scores, steps, nq, max_blocks, cap, s, ids, stream);
