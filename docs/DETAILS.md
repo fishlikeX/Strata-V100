@@ -427,7 +427,7 @@ Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/RE
 **Hybrid K8V4 KV cache (engine 0.1.25, optional, PR #120):** `--kv k8v4` (`START-HERE.bat --setup --kv k8v4`) keeps
 the keys at 8 bits and stores the values as rotated 4-bit: 23% less KV memory than 8-bit, so more experts fit in
 VRAM. RTX 3090, the Coder at 198K context: 99 instead of 85 tokens/s output, the same needle results, prompts 2-5%
-slower. It does not stream its KV cache (KV streaming is on by default from 64K), so it pays off mostly on large
+slower. It streams with --kv-resident too, so it pays off mostly on large
 cards at long contexts.
 
 **Reproducible greedy output (0.1.30, opt-in, `STRATA_IQ_MT_MIN=1`):** with the IQ models, the CPU computes an
@@ -1508,6 +1508,26 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
   against the FP16 prompt path (IQ3_XXS, `--prefill auto`): 8K prompt KL 0.042 (0.1.39: 0.054), top-1 agreement
   93.5% (92.2%); 32K prompt KL 0.020 (0.019), top-1 95.3% (95.0%) - the same band as before. `STRATA_RING_BYTES=0`
   restores 0.1.39's ring, loan and chunk choice.
+
+- **The startup VRAM plan (#765):** before the expert cache takes what is left of the VRAM, the engine prices
+  everything that must still fit beside it - the draft head, the prompt path's own buffers when it cannot borrow
+  (`Prefill::bytes_needed`, exact, in place of the old `160 + chunk * 680 / 1024` estimate that ran ~7x high at a
+  24,576-token chunk) and a slot for `--spec`'s residency table - and prints the plan (`strata generate: VRAM
+  plan:`). A requested `--prefill` the planned cache cannot lend is booked as its own buffers before the cache is
+  committed (the cache shrinks first); a chunk that fits nowhere is reduced to the largest 256-token size that
+  does, said plainly; and a configuration nothing can satisfy is refused at startup with its budget and the knobs
+  that make room, instead of dying between the model load and READY. Part of that price was hidden before: the
+  streamed ring's ~384 separate 2.7 MiB allocations each rounded up to a 2 MiB page, ~0.5 GiB the count never saw -
+  the ring is one allocation now. Measured on an RTX 4070 Ti SUPER (16 GB): at 32K context with `--prefill auto`
+  the plan is exactly what the first prompt borrows (8,192 tokens, 2,487 cache slots, 1,950 tok/s prefill - the
+  numbers the pre-plan engine reached); the 524K int8-KV boot with `--prefill 24576`, which died at its first
+  prompt before the plan, now runs end to end (a 17,664-token chunk on its own buffers, 2,139 tok/s prefill, the
+  cache keeps the slot `--spec` needs).
+
+On this rack's production split (two V100 16 GB, 524,288-token int8 KV, `--prefill auto`,
+layer-split 20) the plan prints the same deal: an 8,192-token chunk lent from the planned
+caches, and the caches opened exactly as planned (8,255 slots on CUDA0, 5,750 on CUDA1).
+The batch-slot fallback below still triggers on the same boot when the slots do not fit.
 
 The full story, with measurements, bottlenecks and what comes next: **[docs/paper/Strata-Paper.pdf](paper/Strata-Paper.pdf)**.
 

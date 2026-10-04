@@ -800,10 +800,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         const QsaState& st = slot_ss(t).qsa_states[qi];
                         const int32_t* step_t = step_ + t * kStepCount;
                         if (st.kv_hybrid) {   // K8V4: the unused half's lanes folded onto the used pool (layer.cpp)
+                            const KvHostPools hk = kv_hybrid_k_half(st.host), hv = kv_hybrid_v_half(st.host);
+                            const bool mirror = st.host.present();   // streamed: the host copy too
                             kv_append_q8_step(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, step_t,
-                                              kcur_ + t * NKV * HD, kcur_ + t * NKV * HD, s, cs, nullptr);
+                                              kcur_ + t * NKV * HD, kcur_ + t * NKV * HD, s, cs, mirror ? &hk : nullptr);
                             kv_append_q4_step(st.v_q4, st.v_q4, st.page_table, step_t, vcur_ + t * NKV * HD,
-                                              vcur_ + t * NKV * HD, s, cs, nullptr);
+                                              vcur_ + t * NKV * HD, s, cs, mirror ? &hv : nullptr);
                         } else if (st.kv_q4)
                             kv_append_q4_step(st.k_q4, st.v_q4, st.page_table, step_t, kcur_ + t * NKV * HD,
                                               vcur_ + t * NKV * HD, s, cs, &st.host);
@@ -1994,7 +1996,16 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     (void) cudaStreamQuery(cs_);
     volatile uint32_t* const seq = h_seq_;
     volatile uint32_t* const flag = h_flag_;
-    const int64_t steps = le_ - lb_;
+    // 100% VRAM resident: the window was recorded as the zero-doorbell graph, which rings no layer and only waits
+    // (layer 1) for the PLE rows stage_batch already gathered - as the solo window, raise the flag once and skip the
+    // per-layer loop.  Waiting for a ring here stalled every batch window on a split whose cards hold every expert
+    // ("verify batch: timed out at layer 0").
+    const int64_t steps = all_resident_ ? 0 : le_ - lb_;
+    if (all_resident_) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        _mm_sfence();
+        *flag = 1;
+    }
     for (int64_t k = 0; k < steps; ++k) {
         const int64_t l = lb_ + k;
         const uint32_t want = (uint32_t) (k + 1);
@@ -2110,6 +2121,12 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
     b_k_ = 0;
     b_steps_ = le_ - lb_;
     b_last_ = Clock::now();
+    if (all_resident_) {   // the zero-doorbell graph rings no layer (see run_slot_rows): batch_poll only waits for it
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        _mm_sfence();
+        *(volatile uint32_t*) h_flag_ = 1;
+        b_k_ = b_steps_;
+    }
     return true;
 }
 
