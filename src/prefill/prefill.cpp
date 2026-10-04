@@ -197,7 +197,10 @@ inline int ring_budget_slots() {
     const int cap = ring_cap();
     return (int) (n <= 0 ? 0 : (n > cap ? cap : n));
 }
-inline int ring_slots(size_t T) {
+// The ring priced at an explicit budget: what `set_ring_budget(budget, 0)` + this T would resolve to, the globals
+// untouched (the startup VRAM plan's and the tests' what-if).  The STRATA_PREFILL_RING override and the layer
+// split's override still win, exactly as in ring_slots.
+inline int ring_slots_priced(size_t T, int64_t ring_budget) {
     const char* v = std::getenv("STRATA_PREFILL_RING");
 #if defined(STRATA_USE_HIP)
     // S6: with the opt-in RDNA4 matrix-core attention (STRATA_HIP_WMMA=1) a 96-slot ring: measured with it, 9070 XT
@@ -209,18 +212,22 @@ inline int ring_slots(size_t T) {
     if (!v && g_ring_override <= 0 && wmma) return (int64_t) T >= stream_all_min() ? 96 : STAGE;
 #endif
     const int pinned_ring = g_pinned_share >= 0.9 ? (fused_ring() ? 1024 : 384) : 96;
-    const bool budget = ring_bytes_on() && g_ring_budget > 0 && (int64_t) T > g_ring_small_max;
+    const bool budget = ring_bytes_on() && ring_budget > 0;
     // The compact tensor-core walk needs at least 48 slots for a 16-expert group and issuer lookahead; on the
     // tested native Q2_0 Volta split, 192 slots kept more copies ahead of compute than 96 or 48.  Where that walk
     // is available (tc_plan: Volta plus a native Q2_0 pack) its slot count takes precedence over the #583 byte
     // budget, which could otherwise fall below the 48-slot floor and silently turn the tensor-core path off.
     // Every other layout keeps the byte budget / pinned-share rule.  The env and layer-split overrides win.
     const int tc_floor = tc_plan().ok && !fused_ring() ? 192 : 0;
-    const int def = tc_floor > 0 ? tc_floor : (budget ? g_ring_budget : pinned_ring);
+    const int def = tc_floor > 0 ? tc_floor : (budget ? (int) ring_budget : pinned_ring);
     const int r = v ? std::atoi(v) : g_ring_override > 0 ? g_ring_override : def;
     if (v && r == STAGE) return STAGE; // Explicit opt-in to routed-only staging, including large chunks.
     const int big = r < 16 ? 16 : r > ring_cap() ? ring_cap() : r;
     return (int64_t) T >= stream_all_min() ? big : STAGE;
+}
+inline int ring_slots(size_t T) {
+    const bool budget = ring_bytes_on() && g_ring_budget > 0 && (int64_t) T > g_ring_small_max;
+    return ring_slots_priced(T, budget ? g_ring_budget : 0);
 }
 constexpr int DQ = 2;              // dequantized-expert ring (FP16 gate/up + down)
 // The BF16-weight projections (hyper-connection, SSM alpha/beta, indexer, router, shared gate, PLE key/value) take
@@ -275,19 +282,20 @@ double ms_since(Clock::time_point t) { return std::chrono::duration<double, std:
 struct Alloc {
     uint8_t* base = nullptr;
     uint64_t cap = 0, used = 0;
+    uint64_t failed_bytes = 0;          ///< the take that could not be allocated; the failure message names it
     bool count_only = false;
     std::vector<void*>* owned = nullptr;
     template <typename T> T* take(size_t n, bool& ok) {
         const uint64_t bytes = ((uint64_t) n * sizeof(T) + 256 + 255) & ~255ull;
         if (count_only) { used += bytes; return nullptr; }
         if (base != nullptr) {
-            if (used + bytes > cap) { ok = false; return nullptr; }
+            if (used + bytes > cap) { ok = false; failed_bytes = bytes; return nullptr; }
             T* p = (T*) (base + used);
             used += bytes;
             return p;
         }
         void* p = nullptr;
-        if (cudaMalloc(&p, bytes) != cudaSuccess) { ok = false; return nullptr; }
+        if (cudaMalloc(&p, bytes) != cudaSuccess) { ok = false; failed_bytes = bytes; return nullptr; }
         owned->push_back(p);
         used += bytes;
         return (T*) p;
@@ -960,7 +968,13 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         if (!m.gemm.init_external(stream, gs, GEMM_SCRATCH, ws, GEMM_WS, err)) return false;
     }
     if (!carve(T, &o)) {
-        err = "prefill: device buffers for a chunk of " + std::to_string(chunk) + " tokens do not fit";
+        size_t fb = 0, tb = 0;
+        cudaMemGetInfo(&fb, &tb);
+        (void) cudaGetLastError();
+        err = "prefill: device buffers for a chunk of " + std::to_string(chunk) + " tokens do not fit (" +
+              std::to_string(fb >> 20) + " of " + std::to_string(tb >> 20) + " MiB free at the failure; " +
+              std::to_string(o.used >> 20) + " MiB allocated, " + (std::to_string((bytes_needed)(*m.g, *m.ss, (int64_t) T) >> 20)) +
+              " MiB counted, the failing buffer wanted " + std::to_string(o.failed_bytes >> 20) + " MiB)";
         return false;
     }
     return true;
@@ -1046,14 +1060,47 @@ bool Prefill::carve(size_t T, void* alloc) {
         if (!m.mmq_ctx) m.mmq_ctx = std::make_unique<mmq::Context>();
     }
     m.ring = ring_slots(T);
-    for (int i = 0; i < m.ring; ++i) {
-        m.stage_dev[i] = o.take<uint8_t>((size_t) MAXBLOB(), ok);
-        m.stage_live[i] = false;                        // a new buffer: nothing of an earlier layout to wait for
-        m.used_of[i] = i;
+    if (std::getenv("STRATA_TRACE") != nullptr) {
+        size_t fbx = 0, tbx = 0;
+        cudaMemGetInfo(&fbx, &tbx);
+        std::fprintf(stderr, "strata trace: prefill carve: after the region %llu MiB (ring %lld, %llu MiB free)\n",
+                     (unsigned long long) (o.used >> 20), (long long) m.ring, (unsigned long long) (fbx >> 20));
+    }
+    // the ring in ONE allocation: 384 separate 2.7 MiB cudaMallocs each round up to a 2 MiB page, ~1.3 MiB a
+    // slot - ~0.5 GiB of VRAM the plain sum in `bytes_needed` never saw, and an owned chunk sized by it then
+    // failed at its first `init`.  The borrowed path always carved these from one region.
+    if (m.ring > 0) {
+        // STRATA_TEST_RING_FAIL=1: the ring's one allocation fails as an out-of-memory cudaMalloc does (tests the
+        // clean failure, as STRATA_TEST_CACHE_FAIL does for the cache's)
+        static const bool ring_fail = [] {
+            const char* v = std::getenv("STRATA_TEST_RING_FAIL");
+            return v != nullptr && v[0] == '1';
+        }();
+        uint8_t* ring_base = nullptr;
+        if (ring_fail) {
+            ok = false;
+            o.failed_bytes = (uint64_t) m.ring * (uint64_t) MAXBLOB();
+        } else {
+            ring_base = o.take<uint8_t>((size_t) m.ring * (size_t) MAXBLOB(), ok);
+        }
+        for (int i = 0; ok && i < m.ring; ++i) {   // no pointer arithmetic on a failed allocation
+            m.stage_dev[i] = ring_base + (size_t) i * (size_t) MAXBLOB();
+            m.stage_live[i] = false;               // a new buffer: nothing of an earlier layout to wait for
+            m.used_of[i] = i;
+        }
     }
     m.ple_emb = o.take<float>(T * N, ok);
     m.ple_norm = o.take<float>((size_t) strata::kernels::NG_HC_DIM, ok);
+    if (std::getenv("STRATA_TRACE") != nullptr) {
+        size_t fbx = 0, tbx = 0;
+        cudaMemGetInfo(&fbx, &tbx);
+        std::fprintf(stderr, "strata trace: prefill carve: after the ring and the PLE row %llu MiB (%llu free)\n",
+                     (unsigned long long) (o.used >> 20), (unsigned long long) (fbx >> 20));
+    }
     take_stage(o, ss, s, m.stage, ok);
+    if (std::getenv("STRATA_TRACE") != nullptr)
+        std::fprintf(stderr, "strata trace: prefill carve: after the KV stage pools %llu MiB\n",
+                     (unsigned long long) (o.used >> 20));
     m.T = (int64_t) T;
     return ok;
 }
@@ -1485,7 +1532,8 @@ void Prefill::set_ring_budget(int slots, int64_t small_max) {
 }
 double Prefill::pinned_share() { return g_pinned_share; }
 
-uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk) {
+uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
+                               int64_t ring_budget) {
     // the same allocation sequence as `init`, counted
     const size_t T = (size_t) chunk;
     bool ok = true;
@@ -1526,7 +1574,8 @@ uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::Session
         o.take<uint8_t>(GROUPS * mp.gu_max + MMQ_TAIL, ok);
         o.take<uint8_t>(GROUPS * mp.d_max + MMQ_TAIL, ok);
     }
-    for (int i = 0; i < ring_slots(T); ++i) o.take<uint8_t>((size_t) MAXBLOB(), ok);
+    const int n_ring = ring_budget < 0 ? ring_slots(T) : ring_slots_priced(T, ring_budget);
+    if (n_ring > 0) o.take<uint8_t>((size_t) n_ring * (size_t) MAXBLOB(), ok);   // one allocation, as carve takes it
     f(T * N);
     f((size_t) strata::kernels::NG_HC_DIM);
     strata::kernels::KvHostPools stage;
@@ -1558,6 +1607,10 @@ int64_t Prefill::ring_max_slots() {
 }
 
 int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chunk); }
+
+int64_t Prefill::ring_slots_under(int64_t chunk, int64_t ring_budget) {
+    return ring_slots_priced((size_t) chunk, ring_budget);
+}
 
 bool Prefill::ring_bytes_enabled() { return ring_bytes_on(); }
 
