@@ -143,6 +143,21 @@ The disk tier accelerates conversation alternation and server restarts. It does 
 
 On this fork's two-V100, layer-split configuration, resuming a 33,725-token conversation from a 25 GiB NVMe cache took 1,614.6 ms to read and 315.8 ms to restore. The complete resumed prompt phase, including 22 new tokens, took 3,015.1 ms. A cold read of the same 33,725-token prefix took 20,332.7 ms. This is a **6.74x speed-up** and an **85.2% prompt-latency reduction** for the resumed request. The 943.6 MiB record restored byte-exact main-model state and identical output across both GPUs. Restart recovery passed byte-exact parity, and corrupt-record fallback produced matching output. See [the benchmark report](benchmarks/v100-l3-conversation-cache-2026-10-03.md).
 
+### Lazy vision (opt-in)
+
+The image encoder (`strata-vision`) holds about 1.74 GiB of VRAM (1.43 GiB on the first GPU, 0.31 GiB on the second) for as long as it runs. With lazy vision it does not run between image requests: that VRAM stays with the expert caches, so text-only work keeps the full resident-expert count.
+
+To enable it, add to the model configuration:
+
+- `"vram_elastic": true` (the engine flag `--vram-elastic`): the expert caches are segmented, so the engine can give VRAM back and take it again between requests.
+- `"vision": {"lazy": true, "idle_s": 900}`: the encoder starts on the first image request and stops after `idle_s` seconds without one (900 = 15 minutes). The encoder needs the engine's one-request-at-a-time mode, so do not combine it with `"parallel"` (or give the encoder its VRAM another way, for example `POST /v1/vram`).
+
+How it behaves:
+
+- A text request never starts the encoder. An image request first tells the engine to hand the GPUs' VRAM back - one reserve per GPU, `[1700, 600]` on a layer split and `[1800]` on one GPU, override with `"vram_mib"` - then starts the encoder and encodes the picture while the engine is idle.
+- After `idle_s` seconds without an image request the encoder stops, and the expert caches grow back to their full size. Encoded images stay cached on disk, so sending the same picture again does not re-encode it.
+- Measured on this fork's two-V100 layer split: the caches hold **14,005** resident experts while the encoder is idle (12,688 with the encoder resident), a cold image request answered in **5.9 s**, and both caches returned to 14,005 after the encoder unloaded. See [details](docs/DETAILS.md).
+
 ## Contributing
 
 Contributions are welcome. You do not need a V100 to help: documentation, tests, setup, server behavior, API compatibility, and improvements for other supported devices are useful. V100-specific code and performance results benefit from validation on real Volta hardware.
