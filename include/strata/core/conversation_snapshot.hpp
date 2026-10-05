@@ -3,6 +3,7 @@
 #include "strata/core/conversation_cache.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
+#include "strata/core/conversation_disk.hpp"
 
 #include <string>
 
@@ -30,6 +31,19 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& state,
 bool conversation_kv_verify(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                             int64_t upto, bool include_index, uint64_t& fingerprint, std::string& error);
 
+// ---- L3 disk-tier tails (append-only chains).  A park writes only the K/V bytes a conversation gained
+// at or after `first_token`: the tail of each layer's page buffer, and the indexer's pooled rows from
+// `first_token / idx_block` on (the "moving spare row" is included, exactly like a save that reuses
+// `first_token` cells).  The image's buffers hold ONLY the tail; its `cells` and geometry still describe
+// the full extent `upto`, so the disk store can splice the tail after an earlier base.  `index` is false
+// for the draft layer, which has no indexer; its tail starts one token early (max(0, first_token - 1))
+// because the ring's final cell is refreshed on the next compute.
+size_t conversation_kv_tail_bytes(const QsaState& state, const ModelGeometry& g, int64_t upto,
+                                  bool include_index, int64_t first_token);
+bool conversation_kv_tail_save(ConversationKv& image, const QsaState& state, const ModelGeometry& g,
+                               int64_t upto, bool include_index, int64_t first_token, std::string& error);
+
+
 struct ConversationStateSizes {
     size_t gdn = 0, ple = 0, tail = 0, dead = 0, block_pos = 0;
 };
@@ -53,6 +67,18 @@ struct ConversationView {
     const std::vector<ConversationCheckpoint>& checkpoints;
     bool cvec;
 };
+
+// ---- The L3 disk tier's delta image for one conversation (one layer-split stage).  The live checkpoint
+// holds ONLY the tokens after first_token (the ids/imgs slice plus the session's current running state),
+// the checkpoint list holds only checkpoints newer than first_token, and the K/V layers hold tails.  The
+// store merges a chain of these back into full images on read.  first_token 0 produces a self-contained
+// seed (every token, every page) - the same shape a root record uses.
+bool conversation_disk_delta_bytes(const ConversationView& view, const SessionState& session,
+                                   const ModelGeometry& g, const QsaState* draft, int64_t first_token,
+                                   size_t& bytes, std::string& error);
+bool conversation_disk_delta_save(SavedConversation& out, const ConversationView& view,
+                                  const SessionState& session, const ModelGeometry& g,
+                                  const QsaState* draft, int64_t first_token, std::string& error);
 bool conversation_snapshot_bytes(const ConversationView& view, const SessionState& session,
                                  const ModelGeometry& g, const QsaState& draft, size_t& bytes, std::string& error);
 bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const ConversationView& view,

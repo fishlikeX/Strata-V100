@@ -5675,8 +5675,13 @@ int main(int argc, char** argv) {
             size_t tokens = 0;
             size_t snapshot_bytes = 0;
             bool root = false;              // a shared system-prompt prefix record, not a conversation park
+            int64_t delta_tokens = 0;       // the park's new tokens (a seed: its whole slice)
         };
         std::optional<std::future<DiskWriteResult>> pending_disk_write;
+        // The L3 disk chain of the MAIN live session: `main_chain` is the store's chain key (stable
+        // from the seed) and `main_cover` its token coverage.  Batch slots carry their own.
+        std::string main_chain;
+        uint64_t main_cover = 0;
         auto finish_disk_write = [&]() {
             if (!pending_disk_write) return;
             DiskWriteResult result = pending_disk_write->get();
@@ -5688,10 +5693,11 @@ int main(int argc, char** argv) {
                              (unsigned long long) disk.bytes());
                 return;
             }
-            std::fprintf(stderr, "strata serve: conversation disk: %s %zu tokens in %.1f ms; records=%zu "
+            std::fprintf(stderr, "strata serve: conversation disk: %s %zu tokens (+%lld) in %.1f ms; records=%zu "
                          "bytes=%llu evictions=%llu corruptions=%llu snapshot_bytes=%zu\n",
                          result.root ? "root parked" : "parked",
-                         result.tokens, result.capture_ms + result.write_ms, disk.records(),
+                         result.tokens, (long long) result.delta_tokens,
+                         result.capture_ms + result.write_ms, disk.records(),
                          (unsigned long long) disk.bytes(), (unsigned long long) disk.evictions(),
                          (unsigned long long) disk.corruptions(), result.snapshot_bytes);
         };
@@ -5707,7 +5713,51 @@ int main(int argc, char** argv) {
         auto park_disk = [&]() {
             if (!disk_enabled || !live_ok || live.empty()) return;
             finish_disk_write();
+            const size_t upto = live.size();
+            if (upto == 0) return;
             const auto t0 = Clock::now();
+            // ---- The chain for the outgoing conversation: its tracked chain; otherwise re-adopt
+            // the longest matching 'c' chain (a restart), or the 'p' root as the seed base (a fresh
+            // chat sharing the system prompt).
+            std::string name = main_chain;
+            std::string base_name;
+            uint64_t cover = main_cover, base_tokens = 0;
+            if (!name.empty() && !disk.cover(name, cover)) name.clear();   // the chain was evicted
+            if (name.empty()) {
+                strata::core::ConversationDiskMatch m;
+                if (disk.best(live, live_imgs, cvec_cached, m) && m.tokens > 0 && !m.name.empty()) {
+                    if (m.name[0] == 'c') {
+                        name = m.name;
+                        if (!disk.cover(name, cover)) name.clear();   // evicted between best and park
+                    } else if (m.name[0] == 'p') {
+                        base_name = m.name;
+                        base_tokens = (uint64_t) m.tokens;
+                    }
+                }
+            }
+            if (name.empty())
+                cover = base_tokens;   // a fresh seed: capture [seed base .. upto), never a stale cover
+            if (!name.empty()) {
+                if (upto < cover) {
+                    // A rewind (the client edited the history): truncate the chain to the deepest
+                    // held panel, then re-capture the tail from the live session.
+                    std::string rerr;
+                    if (disk.rewind_chain(name, (uint64_t) upto, cover, rerr) !=
+                        strata::core::ConversationDiskStatus::ok) {
+                        std::fprintf(stderr, "strata serve: conversation disk: skip parking (%s)\n", rerr.c_str());
+                        main_chain.clear();
+                        main_cover = 0;
+                        return;
+                    }
+                }
+                if (upto == cover) return;          // nothing new since the last park: zero I/O
+                if (upto < cover) {                 // rewound below every held panel: re-seed next park
+                    main_chain.clear();
+                    main_cover = 0;
+                    return;
+                }
+            }
+            // ---- Split the checkpoints into per-stage parts (unchanged from the full-image park).
             std::vector<std::vector<ConvCheckpoint>> stage_checks(disk_stage_count);
             for (auto& v : stage_checks) v.reserve(checks.size());
             for (const ConvCheckpoint& c : checks) {
@@ -5729,6 +5779,8 @@ int main(int argc, char** argv) {
                     stage_checks[i].push_back(std::move(part));
                 }
             }
+            // ---- Capture the DELTA [cover .. upto) per stage: only the new ids/checkpoints/current
+            // running state and the K/V tails - never the whole conversation.
             strata::core::ConversationDiskRecord record;
             record.stages.resize(disk_stage_count);
             std::string derr;
@@ -5737,25 +5789,41 @@ int main(int argc, char** argv) {
                 const strata::core::ConversationView view{live, live_imgs, stage_checks[i], cvec_cached};
                 strata::core::SessionState& session = stage_session(i);
                 const bool ok = owns_draft(i)
-                    ? strata::core::conversation_snapshot_save(record.stages[i], view, session, g, mtp.kv_state(), derr)
-                    : strata::core::conversation_stage_save(record.stages[i], view, session, g, derr);
+                    ? strata::core::conversation_disk_delta_save(record.stages[i], view, session, g,
+                                                                 &mtp.kv_state(), (int64_t) cover, derr)
+                    : strata::core::conversation_disk_delta_save(record.stages[i], view, session, g,
+                                                                 nullptr, (int64_t) cover, derr);
                 if (!ok) {
                     std::fprintf(stderr, "strata serve: conversation disk: skip parking (%s)\n", derr.c_str());
                     return;
                 }
             }
             const size_t ram_bytes = record.bytes();
-            const size_t tokens = live.size();
+            const size_t tokens = upto;
             const double capture_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            const bool fresh = name.empty();
+            if (fresh) {
+                // The chain key from the seed's content: stable for the chain's whole life.
+                name = strata::core::conversation_disk_name(live, live_imgs, cvec_cached);
+            }
+            const std::string chain_key = name;
+            const std::string seed_base = base_name;
+            const int64_t delta_tokens = (int64_t) tokens - (int64_t) cover;
+            // Capture must finish before the session is overwritten. The file write then runs while the next
+            // request uses the GPUs. A lookup or a later park joins the one pending write before the store index.
             pending_disk_write.emplace(std::async(std::launch::async,
-                [&disk, record = std::move(record), capture_ms, tokens, ram_bytes]() mutable {
+                [&disk, record = std::move(record), capture_ms, tokens, ram_bytes, delta_tokens,
+                 chain_key, fresh, seed_base, base_tokens]() mutable {
                     DiskWriteResult result;
                     result.capture_ms = capture_ms;
                     result.tokens = tokens;
                     result.snapshot_bytes = ram_bytes;
+                    result.delta_tokens = delta_tokens;
                     const auto write_at = Clock::now();
                     try {
-                        result.status = disk.put(std::move(record), result.error);
+                        result.status = fresh
+                            ? disk.seed(chain_key, std::move(record), seed_base, base_tokens, result.error)
+                            : disk.append(chain_key, std::move(record), result.error);
                     } catch (const std::exception& e) {
                         result.status = strata::core::ConversationDiskStatus::failed;
                         result.error = e.what();
@@ -5766,6 +5834,8 @@ int main(int argc, char** argv) {
                     result.write_ms = std::chrono::duration<double, std::milli>(Clock::now() - write_at).count();
                     return result;
                 }));
+            main_chain = chain_key;
+            main_cover = (uint64_t) tokens;
         };
         // Save only on a switch/rewind, not on each continuing request. No graph
         // addresses change: all parked images live in ordinary host vectors.
@@ -6014,14 +6084,15 @@ int main(int argc, char** argv) {
                 const size_t tokens = (size_t) L;
                 if (l3_want) {
                     pending_disk_write.emplace(std::async(std::launch::async,
-                        [&disk, record = std::move(record), tokens, ram_bytes]() mutable {
+                        [&disk, record = std::move(record), tokens, ram_bytes, pname]() mutable {
                             DiskWriteResult result;
                             result.root = true;
                             result.tokens = tokens;
                             result.snapshot_bytes = ram_bytes;
+                            result.delta_tokens = (int64_t) tokens;
                             const auto write_at = Clock::now();
                             try {
-                                result.status = disk.put(std::move(record), result.error, true);
+                                result.status = disk.seed(pname, std::move(record), std::string(), 0, result.error);
                             } catch (const std::exception& e) {
                                 result.status = strata::core::ConversationDiskStatus::failed;
                                 result.error = e.what();
@@ -6671,6 +6742,9 @@ int main(int argc, char** argv) {
             // header): a client's next turn renders the history again WITHOUT this reply's thinking, so it matches
             // the slot's tokens only up to there - the slot's K/V up to it plus this state continue from it
             std::vector<ConvCheckpoint> checks;
+            // the L3 disk chain this conversation belongs to (chain key + coverage at the last park)
+            std::string chain;
+            uint64_t cover = 0;
             // a prompt read that gave way to a waiting request (BYIELD): `ids` is the part read so far, and the same
             // request continues from it (the read goes on with the same chunks; `from0`: it had started at token 0)
             bool partial = false, partial_from0 = false;
@@ -6715,6 +6789,8 @@ int main(int argc, char** argv) {
                 }
                 if (cudaDeviceSynchronize() != cudaSuccess) { e = "batch admission: device sync failed"; return false; }
             }
+            bs[(size_t) b].chain = main_chain;
+            bs[(size_t) b].cover = main_cover;
             return true;
         };
         // slot b's sessions -> the main ones (the reverse of copy_to_slot): a request that continues the
@@ -7390,6 +7466,8 @@ int main(int argc, char** argv) {
                     live_imgs.clear();
                     resume = slot_tokens;
                     from_live = true;
+                    main_chain = bs[(size_t) slot_source].chain;
+                    main_cover = bs[(size_t) slot_source].cover;
                     std::fprintf(stderr, "strata batch: slot %d gave back %lld tokens of this conversation (%s) in "
                                  "%.1f ms\n", slot_source, (long long) slot_tokens,
                                  slot_ck != nullptr ? "its turn checkpoint" : "all it holds",
@@ -7432,6 +7510,8 @@ int main(int argc, char** argv) {
                                  (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));
                 }
                 live = std::move(incoming->live.ids);
+                main_chain.clear();     // a RAM image: re-adopt its disk chain at the next park
+                main_cover = 0;
                 live_imgs = std::move(incoming->live.imgs);
                 if (stages.empty()) {
                     checks = std::move(incoming->checkpoints);
@@ -7500,6 +7580,10 @@ int main(int argc, char** argv) {
                     check_clock = std::max(check_clock, checkpoint.used);
                 resume = dmatch.tokens;
                 from_live = dmatch.tokens == (int64_t) live.size();
+                main_chain.clear();
+                main_cover = 0;
+                if (!dmatch.name.empty() && dmatch.name[0] == 'c')
+                    main_chain = dmatch.name;   // the coverage is re-read from the store at the next park
                 std::fprintf(stderr, "strata serve: conversation disk: restored %lld tokens (%s) in %.1f ms; "
                                      "records=%zu bytes=%llu hits=%llu misses=%llu\n",
                              (long long) resume, from_live ? "live" : "checkpoint",

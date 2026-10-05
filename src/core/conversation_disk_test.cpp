@@ -1,9 +1,12 @@
-// src/core/conversation_disk_test.cpp - the L3 disk tier, CPU only. No CUDA, no model.
+// src/core/conversation_disk_test.cpp - the L3 disk tier (append-only chains), CPU only. No CUDA.
 //
-// The test builds SavedConversation images by hand, writes them to a temporary directory, and
-// checks the round trip, the exact prefix lookup, the atomic publication, the startup recovery,
-// the LRU eviction, and every corruption path.
+// The test builds SavedConversation deltas by hand - the same shape the engine captures: sliced
+// ids/imgs, the current running state, only the NEW checkpoints, and K/V TAILS from the first new
+// page - writes them through the store, and checks the merged read-back, the prefix lookup, the
+// base ('p' root) resolution, the torn-tail recovery, the rewind, the eviction ordering, the
+// startup re-index, and every corruption path.
 #include "strata/core/conversation_disk.hpp"
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -35,9 +38,10 @@ ConversationBuffer make_buffer(size_t bytes, uint8_t value) {
     return buffer;
 }
 
-ConversationDiskRecord make_record(std::initializer_list<int32_t> ids, uint8_t fill, size_t kv_bytes,
-                                   bool cvec = true, std::initializer_list<ConversationImageKey> images = {}) {
-    ConversationDiskRecord record;
+int64_t aligned(int64_t cells, int64_t page) { return (cells + page - 1) / page * page; }
+
+// A stage skeleton with one K/V layer; the caller sets the ids and the page-rounded cells.
+SavedConversation make_stage(int64_t rate, uint8_t fill, bool cvec = true) {
     SavedConversation stage;
     stage.geometry[0] = 8;
     stage.geometry[1] = 1;
@@ -45,35 +49,100 @@ ConversationDiskRecord make_record(std::initializer_list<int32_t> ids, uint8_t f
     stage.layer_lo = 0;
     stage.layer_hi = 4;
     stage.cvec = cvec;
-    stage.live.ids.assign(ids);
-    stage.live.imgs.assign(images);
     stage.live.gdn.assign(8, fill);
     stage.live.ple.assign(5, static_cast<uint8_t>(fill + 1));
     stage.live.tails.assign(3, static_cast<uint8_t>(fill + 2));
     stage.live.dead.assign(2, static_cast<uint8_t>(fill + 3));
     stage.live.block_pos.assign(4, static_cast<uint8_t>(fill + 4));
-    ConversationKv kv;
+    stage.kv.resize(1);
+    ConversationKv& kv = stage.kv.front();
     kv.format = 0;
-    kv.cells = 4;
     kv.heads = 1;
     kv.head_dim = 64;
-    kv.page_size = 4;
+    kv.page_size = 8;
     kv.pooled_rows = 2;
     kv.idx_dim = 8;
-    kv.k = make_buffer(kv_bytes, fill);
-    kv.v = make_buffer(kv_bytes + 1, static_cast<uint8_t>(fill + 1));
-    kv.k_scale = make_buffer(16, static_cast<uint8_t>(fill + 2));
-    kv.v_scale = make_buffer(16, static_cast<uint8_t>(fill + 3));
-    kv.pooled = make_buffer(64, static_cast<uint8_t>(fill + 4));
-    stage.kv.push_back(std::move(kv));
-    record.stages.push_back(std::move(stage));
-    return record;
+    return stage;
+}
+
+// The full image of a conversation at `upto` tokens (the reference the merges must equal).
+
+const std::vector<int32_t>& all_ids() {
+    static const std::vector<int32_t> ids = [] {
+        std::vector<int32_t> v;
+        for (int32_t i = 11; v.size() < 40; i += 11) v.push_back(i);
+        return v;
+    }();
+    return ids;
+}
+SavedConversation full_image(size_t upto, uint8_t fill = 77, int64_t rate = 4) {
+    SavedConversation stage = make_stage(rate, fill);
+    stage.live.ids.assign(all_ids().begin(), all_ids().begin() + (int64_t) upto);
+    stage.kv.front().cells = aligned((int64_t) upto, 8);
+    const int64_t cells = stage.kv.front().cells;
+    stage.kv.front().k = make_buffer((size_t) (cells * rate), fill);
+    stage.kv.front().v = make_buffer((size_t) (cells * rate), static_cast<uint8_t>(fill + 1));
+    stage.kv.front().k_scale = make_buffer((size_t) (cells * 2), static_cast<uint8_t>(fill + 2));
+    stage.kv.front().v_scale = make_buffer((size_t) (cells * 2), static_cast<uint8_t>(fill + 3));
+    stage.kv.front().pooled = make_buffer((size_t) ((upto / 4 + 1) * 32), static_cast<uint8_t>(fill + 4));
+    return stage;
+}
+
+// The engine-captured DELTA for the same stage: ids [first..end), the CURRENT run-state, only
+// checkpoints newer than `first`, and K/V TAILS beginning at the page containing `first`.
+
+// A byte-exact tail slice of a full buffer, starting at byte `offset`.
+ConversationBuffer copy_slice(const ConversationBuffer& src, size_t offset, size_t count) {
+    ConversationBuffer out;
+    out.resize(count);
+    if (count != 0) {
+        std::vector<uint8_t> tmp(count);
+        check(src.read(tmp.data(), offset, count), "a tail slice reads its source");
+        size_t done = 0;
+        out.visit(0, count, [&](uint8_t* p, size_t chunk, size_t) {
+            std::memcpy(p, tmp.data() + done, chunk);
+            done += chunk;
+            return true;
+        });
+    }
+    return out;
+}
+SavedConversation make_delta_stage(const SavedConversation& full, int64_t first, int64_t rate) {
+    SavedConversation delta;
+    delta.geometry = full.geometry;
+    delta.layer_lo = full.layer_lo;
+    delta.layer_hi = full.layer_hi;
+    delta.cvec = full.cvec;
+    delta.live.ids.assign(full.live.ids.begin() + first, full.live.ids.end());
+    delta.live.gdn = full.live.gdn;
+    delta.live.ple = full.live.ple;
+    delta.live.tails = full.live.tails;
+    delta.live.dead = full.live.dead;
+    delta.live.block_pos = full.live.block_pos;
+    delta.live.used = full.live.used;
+    delta.kv.resize(1);
+    const ConversationKv& kv = full.kv.front();
+    const int64_t page_pad = (first / kv.page_size) * kv.page_size;
+    ConversationKv& out = delta.kv.front();
+    out.format = kv.format;
+    out.cells = kv.cells;
+    out.heads = kv.heads;
+    out.head_dim = kv.head_dim;
+    out.page_size = kv.page_size;
+    out.pooled_rows = kv.pooled_rows;
+    out.idx_dim = kv.idx_dim;
+    out.k = copy_slice(kv.k, (size_t) page_pad * rate, kv.k.size() - (size_t) page_pad * rate);
+    out.v = copy_slice(kv.v, (size_t) page_pad * rate, kv.v.size() - (size_t) page_pad * rate);
+    out.k_scale = copy_slice(kv.k_scale, (size_t) page_pad * 2, kv.k_scale.size() - (size_t) page_pad * 2);
+    out.v_scale = copy_slice(kv.v_scale, (size_t) page_pad * 2, kv.v_scale.size() - (size_t) page_pad * 2);
+    out.pooled = copy_slice(kv.pooled, (size_t) ((first / 4) * 32), kv.pooled.size() - (size_t) ((first / 4) * 32));
+    out.first_units = {page_pad, page_pad, page_pad, page_pad, first / 4};
+    return delta;
 }
 
 bool same_checkpoint(const ConversationCheckpoint& a, const ConversationCheckpoint& b) {
-    return a.ids == b.ids && a.imgs == b.imgs && a.gdn == b.gdn && a.ple == b.ple && a.tails == b.tails &&
-           a.dead == b.dead && a.block_pos == b.block_pos && a.used == b.used &&
-           a.stage_parts.size() == b.stage_parts.size();
+    return a.gdn == b.gdn && a.ple == b.ple && a.tails == b.tails && a.dead == b.dead &&
+           a.block_pos == b.block_pos && a.used == b.used && a.stage_parts.size() == b.stage_parts.size();
 }
 
 bool same_kv(const ConversationKv& a, const ConversationKv& b) {
@@ -85,13 +154,7 @@ bool same_kv(const ConversationKv& a, const ConversationKv& b) {
 bool same_stage(const SavedConversation& a, const SavedConversation& b) {
     if (a.geometry != b.geometry || a.layer_lo != b.layer_lo || a.layer_hi != b.layer_hi || a.cvec != b.cvec)
         return false;
-    if (!same_checkpoint(a.live, b.live) || a.checkpoints.size() != b.checkpoints.size() ||
-        a.kv.size() != b.kv.size())
-        return false;
-    for (size_t i = 0; i < a.checkpoints.size(); ++i)
-        if (!same_checkpoint(a.checkpoints[i], b.checkpoints[i])) return false;
-    for (size_t i = 0; i < a.kv.size(); ++i)
-        if (!same_kv(a.kv[i], b.kv[i])) return false;
+    if (!same_checkpoint(a.live, b.live) || !same_kv(a.kv.front(), b.kv.front())) return false;
     return true;
 }
 
@@ -119,393 +182,344 @@ void patch_byte(const std::filesystem::path& path, uint64_t offset, uint8_t valu
     std::fclose(file);
 }
 
-std::vector<std::filesystem::path> temporary_files(const std::filesystem::path& directory) {
-    std::vector<std::filesystem::path> found;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-        const std::string name = entry.path().filename().string();
-        if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0) found.push_back(entry.path());
+std::filesystem::path scratch_dir(const char* tag) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                ("strata-disk-" + std::string(tag) + "-" +
+                                 std::to_string((unsigned long) getpid()));
+    std::filesystem::remove_all(dir);
+    return dir;
+}
+
+void test_basic_chain() {
+    std::filesystem::path dir = scratch_dir("chain");
+    ConversationDiskStore store;
+    std::string error;
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+
+    // Seed [0..12), append [12..24), append [24..32).  The merged read-back must equal the full
+    // image at 32 tokens.
+    const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32), {}, true);
+    ConversationDiskRecord seed;
+    seed.stages.push_back(make_delta_stage(full_image(12), 0, 4));
+    check(store.seed(name, std::move(seed), "", 0, error) == ConversationDiskStatus::ok, "a seed parks");
+    uint64_t cover = 0;
+    check(store.cover(name, cover) && cover == 12, "the seed covers 12 tokens");
+    check(store.records() == 1, "one chain after the seed");
+
+    ConversationDiskRecord merged;
+    check(store.get(name, merged, error) == ConversationDiskStatus::ok, "the seed reads back");
+    check(merged.stages[0].live.ids.size() == 12, "the seed merges to 12 ids");
+
+    ConversationDiskRecord d12;
+    d12.stages.push_back(make_delta_stage(full_image(24), 12, 4));
+    check(store.append(name, std::move(d12), error) == ConversationDiskStatus::ok, "an append parks");
+    ConversationDiskRecord d24;
+    d24.stages.push_back(make_delta_stage(full_image(32), 24, 4));
+    check(store.append(name, std::move(d24), error) == ConversationDiskStatus::ok, "the second append parks");
+    check(store.cover(name, cover) && cover == 32, "the chain covers 32 tokens");
+    check(store.records() == 1, "still one chain after appends");
+
+    check(store.get(name, merged, error) == ConversationDiskStatus::ok, "the chain reads back");
+    check(merged.stages[0].live.ids ==
+              std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32),
+          "the merged ids are the full chain");
+    check(same_record(merged, [&] {
+        ConversationDiskRecord full;
+        full.stages.push_back(full_image(32));
+        return full;
+    }()), "the merged image equals the full capture");
+
+    // best() returns the longest stored prefix.
+    ConversationDiskRecord short_seed;
+    short_seed.stages.push_back(make_delta_stage(full_image(12), 0, 4));
+    const std::string short_name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 12), {}, true);
+    check(store.seed(short_name, std::move(short_seed), "", 0, error) == ConversationDiskStatus::ok,
+          "a second seed");
+    ConversationDiskMatch m;
+    check(store.best(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 20), {}, true, m), "best finds a prefix");
+    check(m.tokens == 12 && (m.name == short_name || m.name == name), "best returns a 12-token chain");
+
+    check(store.remove(name, error) == ConversationDiskStatus::ok, "the chain removes");
+    check(store.remove(short_name, error) == ConversationDiskStatus::ok, "the second chain removes");
+    check(store.records() == 0, "the store is empty after removal");
+    std::filesystem::remove_all(dir);
+}
+
+void test_root_base() {
+    std::filesystem::path dir = scratch_dir("root");
+    ConversationDiskStore store;
+    std::string error;
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+
+    // The shared system prompt: a self-contained 'p' chain at 8 tokens.
+    const std::string pname = conversation_disk_prefix_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 8), {}, true);
+    ConversationDiskRecord root_rec;
+    root_rec.stages.push_back(make_delta_stage(full_image(8), 0, 4));
+    check(store.seed(pname, std::move(root_rec), "", 0, error) == ConversationDiskStatus::ok, "the root parks");
+
+    // Two chats sharing the root: each seeds from the root's coverage and appends its own tail.
+    const std::string cname1 = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 16), {}, true);
+    const std::string cname2 = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 12), {}, true);
+    ConversationDiskRecord seed1;
+    seed1.stages.push_back(make_delta_stage(full_image(16), 8, 4));
+    ConversationDiskRecord seed2;
+    seed2.stages.push_back(make_delta_stage(full_image(12), 8, 4));
+    check(store.seed(cname1, std::move(seed1), pname, 8, error) == ConversationDiskStatus::ok,
+          "a chat seeds on the root base");
+    check(store.seed(cname2, std::move(seed2), pname, 8, error) == ConversationDiskStatus::ok,
+          "the second chat seeds");
+
+    // (At these small scales the per-chat delta and the root's snapshot are comparable in bytes -
+    // the real dedup signal is the content below: a root-backed chat must MERGE to its full image
+    // without ever holding the root's K/V, and the eviction test pins the referenced root.)
+
+    ConversationDiskRecord back;
+    check(store.get(cname1, back, error) == ConversationDiskStatus::ok, "a root-backed chat reads back");
+    check(back.stages[0].live.ids.size() == 16, "the merged chat has the full ids");
+    check(same_record(back, [&] {
+        ConversationDiskRecord full;
+        full.stages.push_back(full_image(16));
+        return full;
+    }()), "the merged chat equals its full capture");
+
+    // A 9-token request matches the root at 8 (a record may never cover the whole prompt).
+    ConversationDiskMatch m;
+    check(store.best(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 9), {}, true, m),
+          "a 9-token request matches a stored prefix");
+    check(m.tokens == 8 && m.name == pname, "the root wins the equal-length tie");
+    check(store.records() == 3, "root + two chats");
+    std::filesystem::remove_all(dir);
+}
+
+void test_torn_tail() {
+    std::filesystem::path dir = scratch_dir("torn");
+    ConversationDiskStore store;
+    std::string error;
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+    const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32), {}, true);
+    ConversationDiskRecord seed;
+    seed.stages.push_back(make_delta_stage(full_image(12), 0, 4));
+    check(store.seed(name, std::move(seed), "", 0, error) == ConversationDiskStatus::ok, "the seed parks");
+    ConversationDiskRecord d12;
+    d12.stages.push_back(make_delta_stage(full_image(24), 12, 4));
+    check(store.append(name, std::move(d12), error) == ConversationDiskStatus::ok, "the first append");
+    ConversationDiskRecord d24;
+    d24.stages.push_back(make_delta_stage(full_image(32), 24, 4));
+    check(store.append(name, std::move(d24), error) == ConversationDiskStatus::ok, "the second append");
+
+    // Tear the LAST panel's payload (one byte in its middle) and re-read: the store truncates
+    // back to the last complete panel and serves the chain at 24 tokens.
+    const std::filesystem::path file = dir / (name + ".conversation");
+    std::FILE* f = std::fopen(file.string().c_str(), "rb");
+    check(f != nullptr, "the chain file opens");
+    uint64_t pos = 128;
+    uint64_t payload_at = 0;
+    uint64_t meta = 0, payload = 0;
+    for (int k = 0; k < 3; ++k) {
+        uint64_t magic, base, end, mck, pck;
+        check(std::fseek(f, (long) pos, SEEK_SET) == 0, "the scan seeks to a panel");
+        check(std::fread(&magic, 8, 1, f) == 1 && std::fread(&base, 8, 1, f) == 1 &&
+                  std::fread(&end, 8, 1, f) == 1 && std::fread(&meta, 8, 1, f) == 1 &&
+                  std::fread(&mck, 8, 1, f) == 1 && std::fread(&payload, 8, 1, f) == 1 &&
+                  std::fread(&pck, 8, 1, f) == 1,
+              "panel headers read");
+        pos += 56 + meta + payload;
+        if (k == 2) payload_at = pos - payload;   // the last panel's payload start
     }
-    return found;
+    std::fclose(f);
+    patch_byte(file, payload_at + 100, 0x5A);
+    ConversationDiskRecord back;
+    check(store.get(name, back, error) == ConversationDiskStatus::ok, "a torn tail recovers on read");
+    check(back.stages[0].live.ids ==
+              std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 24),
+          "the recovered ids are the pre-tear chain");
+    uint64_t cover = 0;
+    check(store.cover(name, cover) && cover == 24, "the coverage reverts to the last good panel");
+    store.remove(name, error);
+    std::filesystem::remove_all(dir);
 }
 
-void test_checksum_and_identity() {
-    check(conversation_disk_checksum(nullptr, 0) == 14695981039346656037ull,
-          "FNV-1a 64 of an empty input");
-    const uint8_t a = 'a';
-    check(conversation_disk_checksum(&a, 1) == 0xaf63dc4c8601ec8cull, "FNV-1a 64 of \"a\"");
-    const uint8_t abc[3] = {'a', 'b', 'c'};
-    check(conversation_disk_checksum(abc, 3) == 0xe71fa2190541574bull, "FNV-1a 64 of \"abc\"");
-    const ConversationDiskIdentity first = ConversationDiskIdentity::from_string("qwen3-v100");
-    const ConversationDiskIdentity again = ConversationDiskIdentity::from_string("qwen3-v100");
-    const ConversationDiskIdentity other = ConversationDiskIdentity::from_string("qwen3-v100-rope");
-    check(first == again, "the identity from one text key is stable");
-    check(!(first == other), "two text keys give two identities");
-    bool nonzero = false;
-    for (const uint8_t byte : first.bytes) nonzero = nonzero || byte != 0;
-    check(nonzero, "the identity is not all zero");
-}
-
-void test_name() {
-    const std::vector<int32_t> ids = {1, 2, 3};
-    const std::vector<ConversationImageKey> images = {{0, 7}};
-    const std::string name = conversation_disk_name(ids, images, true);
-    check(name == conversation_disk_name(ids, images, true), "the name is stable");
-    check(name.find('/') == std::string::npos && name.find('\\') == std::string::npos,
-          "the name has no separator");
-    check(name.find("..") == std::string::npos, "the name has no parent reference");
-    check(name != conversation_disk_name(ids, images, false), "the cvec flag changes the name");
-    check(name != conversation_disk_name(ids, {{0, 8}}, true), "the image key changes the name");
-    check(name != conversation_disk_name({1, 2}, images, true), "the token prefix changes the name");
-}
-
-void test_round_trip(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("round-trip");
+void test_rewind() {
+    std::filesystem::path dir = scratch_dir("rewind");
     ConversationDiskStore store;
     std::string error;
-    check(store.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-          "the store opens");
-    check(store.enabled(), "the store is enabled");
-    // One buffer larger than a segment proves the segmented streaming path.
-    const size_t kv_bytes = ConversationBuffer::segment_bytes + 17;
-    ConversationDiskRecord record = make_record({1, 2, 3, 4}, 0x10, kv_bytes);
-    const ConversationDiskRecord original = record;
-    check(store.put(std::move(record), error) == ConversationDiskStatus::ok, "the record lands");
-    check(store.records() == 1, "the store holds one record");
-    check(store.bytes() > 0, "the store accounts for the record bytes");
-    const std::string name = conversation_disk_name({1, 2, 3, 4}, {}, true);
-    check(std::filesystem::exists(directory / (name + ConversationDiskStore::file_suffix)),
-          "the record file exists");
-    check(temporary_files(directory).empty(), "no temporary file remains");
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+    const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32), {}, true);
+    ConversationDiskRecord seed;
+    seed.stages.push_back(make_delta_stage(full_image(12), 0, 4));
+    check(store.seed(name, std::move(seed), "", 0, error) == ConversationDiskStatus::ok, "the seed parks");
+    ConversationDiskRecord d12;
+    d12.stages.push_back(make_delta_stage(full_image(24), 12, 4));
+    check(store.append(name, std::move(d12), error) == ConversationDiskStatus::ok, "the first append");
+    ConversationDiskRecord d24;
+    d24.stages.push_back(make_delta_stage(full_image(32), 24, 4));
+    check(store.append(name, std::move(d24), error) == ConversationDiskStatus::ok, "the second append");
 
-    ConversationDiskMatch match;
-    check(store.best({1, 2, 3, 4, 5}, {}, true, match), "the prefix matches");
-    check(match.tokens == 4 && match.name == name, "the match has the deepest prefix and the name");
-    check(!store.best({1, 2, 3, 4}, {}, true, match), "an equal-length prompt is not a match");
-    check(!store.best({1, 2, 9}, {}, true, match), "a different token is not a match");
-    check(!store.best({1, 2, 3, 4, 5}, {}, false, match), "a different cvec flag is not a match");
+    uint64_t cover = 0;
+    check(store.rewind_chain(name, 15, cover, error) == ConversationDiskStatus::ok && cover == 12,
+          "a rewind to 15 truncates at the last panel end <= 15 (12)");
+    check(store.cover(name, cover) && cover == 12, "the chain covers 12 after the rewind");
 
-    ConversationDiskRecord loaded;
-    check(store.get(name, loaded, error) == ConversationDiskStatus::ok, "the record loads");
-    check(same_record(loaded, original), "the loaded record equals the stored one");
-    check(loaded.stages.front().kv.front().k.size() == kv_bytes, "the segmented buffer keeps its size");
-    check(store.get(conversation_disk_name({9, 9, 9}, {}, true), loaded, error) ==
-              ConversationDiskStatus::miss,
-          "an unknown name is a miss");
-    check(store.remove(name, error) == ConversationDiskStatus::ok, "the record removes");
-    check(store.records() == 0 && store.bytes() == 0, "the index forgets the removed record");
-    check(store.remove(name, error) == ConversationDiskStatus::miss, "a second remove is a miss");
-    check(!store.best({1, 2, 3, 4, 5}, {}, true, match), "a removed record does not match");
+    // The editor rewrote the tail: a fresh lineage from 12 onward (a different run-state).
+    SavedConversation redo = full_image(20, 90);
+    redo.live.used = 7;
+    ConversationDiskRecord redo_rec;
+    redo_rec.stages.push_back(make_delta_stage(redo, 12, 4));
+    check(store.append(name, std::move(redo_rec), error) == ConversationDiskStatus::ok, "the rewrite appends");
+    ConversationDiskRecord back;
+    check(store.get(name, back, error) == ConversationDiskStatus::ok, "the rewound chain reads back");
+    check(back.stages[0].live.ids ==
+              std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 20),
+          "the rewound chain holds [0..20)");
+    check(back.stages[0].live.used == 7, "the merged live state is the rewrite's");
+    check(back.stages[0].kv.front().k.size() == (size_t) (aligned(20, 8) * 4),
+          "the merged K/V is back to the full extent");
+    store.remove(name, error);
+    std::filesystem::remove_all(dir);
 }
 
-void test_exact_images(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("images");
+void test_eviction_order() {
+    std::filesystem::path dir = scratch_dir("evict");
+    std::string error;
+    // Phase 1: root + two root-backed chats, in a generous store.
+    uint64_t budget = 1ull << 30;
     ConversationDiskStore store;
-    std::string error;
-    check(store.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-          "the image store opens");
-    ConversationDiskRecord record = make_record({5, 6, 7}, 0x20, 256, true, {{0, 0x1234}});
-    check(store.put(std::move(record), error) == ConversationDiskStatus::ok, "the image record lands");
-    ConversationDiskMatch match;
-    check(store.best({5, 6, 7, 8}, {{0, 0x1234}}, true, match), "the same image key matches");
-    check(match.tokens == 3, "the image match has the deepest prefix");
-    check(!store.best({5, 6, 7, 8}, {{0, 0x1235}}, true, match), "a different image key does not match");
-    check(!store.best({5, 6, 7, 8}, {}, true, match), "a missing image key does not match");
-}
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), budget), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+    const std::string pname = conversation_disk_prefix_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 8), {}, true);
+    ConversationDiskRecord root_rec;
+    root_rec.stages.push_back(make_delta_stage(full_image(8), 0, 4));
+    check(store.seed(pname, std::move(root_rec), "", 0, error) == ConversationDiskStatus::ok, "the root parks");
+    const uint64_t root_bytes = std::filesystem::file_size(dir / (pname + ".conversation"));
 
-void test_multi_stage(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("split");
-    ConversationDiskStore store;
-    std::string error;
-    check(store.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-          "the split store opens");
-    ConversationDiskRecord record = make_record({2, 4, 6, 8}, 0x30, 512);
-    SavedConversation second = record.stages.front();
-    second.layer_lo = 4;
-    second.layer_hi = 8;
-    second.kv.front().k = make_buffer(513, 0xAB);
-    record.stages.push_back(std::move(second));
-    const ConversationDiskRecord original = record;
-    check(store.put(std::move(record), error) == ConversationDiskStatus::ok, "the two-stage record lands");
-    ConversationDiskMatch match;
-    check(store.best({2, 4, 6, 8, 10}, {}, true, match) && match.tokens == 4,
-          "the two-stage record matches on its shared chain");
-    ConversationDiskRecord loaded;
-    check(store.get(match.name, loaded, error) == ConversationDiskStatus::ok, "the two-stage record loads");
-    check(loaded.stages.size() == 2, "both stages return");
-    check(loaded.stages[1].layer_lo == 4 && loaded.stages[1].layer_hi == 8, "the second carve returns");
-    check(same_record(loaded, original), "both stages equal the stored images");
-}
-
-void test_recovery(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("recovery");
-    const std::string name = conversation_disk_name({3, 1, 4, 1}, {}, true);
-    const ConversationDiskRecord original = make_record({3, 1, 4, 1}, 0x40, 128);
-    {
-        ConversationDiskStore store;
-        std::string error;
-        check(store.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-              "the first store opens");
-        ConversationDiskRecord record = original;
-        check(store.put(std::move(record), error) == ConversationDiskStatus::ok, "the record lands");
-    }
-    ConversationDiskStore reopened;
-    std::string error;
-    check(reopened.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-          "the store reopens");
-    check(reopened.records() == 1 && reopened.recoveries() == 1, "the index recovers the record");
-    ConversationDiskMatch match;
-    check(reopened.best({3, 1, 4, 1, 5}, {}, true, match) && match.name == name,
-          "the recovered record matches");
-    ConversationDiskRecord loaded;
-    check(reopened.get(name, loaded, error) == ConversationDiskStatus::ok, "the recovered record loads");
-    check(same_record(loaded, original), "the recovered record equals the stored one");
-}
-
-void test_eviction(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("eviction");
-    uint64_t one = 0;
-    {
-        ConversationDiskStore probe;
-        std::string error;
-        check(probe.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-              "the probe store opens");
-        ConversationDiskRecord record = make_record({1, 1, 1, 1}, 0x50, 128);
-        check(probe.put(std::move(record), error) == ConversationDiskStatus::ok, "the probe record lands");
-        one = probe.bytes();
-        check(one > 0, "the probe record has a size");
-        check(probe.remove(conversation_disk_name({1, 1, 1, 1}, {}, true), error) ==
-                  ConversationDiskStatus::ok,
-              "the probe record removes");
-    }
-    ConversationDiskStore store;
-    std::string error;
-    check(store.open(options_for(directory, identity, 2 * one), error) == ConversationDiskStatus::ok,
-          "the small store opens");
-    ConversationDiskRecord first = make_record({1, 1, 1, 1}, 0x50, 128);
-    ConversationDiskRecord second = make_record({1, 1, 1, 2}, 0x50, 128);
-    ConversationDiskRecord third = make_record({1, 1, 1, 3}, 0x50, 128);
-    check(store.put(std::move(first), error) == ConversationDiskStatus::ok, "the first record lands");
-    check(store.put(std::move(second), error) == ConversationDiskStatus::ok, "the second record lands");
-    const std::string first_name = conversation_disk_name({1, 1, 1, 1}, {}, true);
-    const std::string second_name = conversation_disk_name({1, 1, 1, 2}, {}, true);
-    const std::string third_name = conversation_disk_name({1, 1, 1, 3}, {}, true);
-    ConversationDiskRecord loaded;
-    check(store.get(first_name, loaded, error) == ConversationDiskStatus::ok, "the first record loads");
-    check(store.put(std::move(third), error) == ConversationDiskStatus::ok, "the third record lands");
-    check(store.bytes() <= 2 * one, "the store stays inside the budget");
-    check(store.records() == 2 && store.evictions() == 1, "one record was evicted");
-    ConversationDiskMatch match;
-    check(store.best({1, 1, 1, 1, 9}, {}, true, match), "the used record survives");
-    check(store.best({1, 1, 1, 3, 9}, {}, true, match), "the newest record survives");
-    check(!store.best({1, 1, 1, 2, 9}, {}, true, match), "the least recently used record is gone");
-    check(!std::filesystem::exists(directory / (second_name + ConversationDiskStore::file_suffix)),
-          "the evicted file is gone");
-}
-
-void test_caps_and_limits(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("caps");
-    ConversationDiskStore store;
-    std::string error;
-    ConversationDiskOptions options = options_for(directory, identity, 1ull << 30);
-    options.max_records = 1;
-    check(store.open(options, error) == ConversationDiskStatus::ok, "the capped store opens");
-    ConversationDiskRecord first = make_record({7, 7, 7, 1}, 0x60, 128);
-    ConversationDiskRecord second = make_record({7, 7, 7, 2}, 0x60, 128);
-    check(store.put(std::move(first), error) == ConversationDiskStatus::ok, "the first capped record lands");
-    check(store.put(std::move(second), error) == ConversationDiskStatus::ok, "the second capped record lands");
-    check(store.records() == 1, "the record cap holds one record");
-    ConversationDiskMatch match;
-    check(!store.best({7, 7, 7, 1, 9}, {}, true, match), "the capped-out record is gone");
-    check(store.best({7, 7, 7, 2, 9}, {}, true, match), "the newest record stays");
-}
-
-void test_corruption(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("corruption");
-    const std::string name = conversation_disk_name({8, 8, 8, 8}, {}, true);
-    const std::filesystem::path file = directory / (name + ConversationDiskStore::file_suffix);
-    auto make = [&]() {
-        ConversationDiskStore store;
-        std::string error;
-        check(store.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-              "the corruption store opens");
-        ConversationDiskRecord record = make_record({8, 8, 8, 8}, 0x70, 128);
-        check(store.put(std::move(record), error) == ConversationDiskStatus::ok, "the corruption record lands");
-        return store;
+    auto chat_seed = [&](size_t upto, const char* suffix, std::string& cname, uint8_t fill) {
+        SavedConversation full = full_image(upto, fill);
+        ConversationDiskRecord rec;
+        rec.stages.push_back(make_delta_stage(full, 8, 4));
+        cname = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + (int64_t) upto),
+                                       {}, true) + std::string(suffix);
+        check(store.seed(cname, std::move(rec), pname, 8, error) == ConversationDiskStatus::ok,
+              "a root-backed chat seeds");
     };
-    // A flipped payload byte.
-    {
-        ConversationDiskStore store = make();
-        std::string error;
-        patch_byte(file, std::filesystem::file_size(file) - 1, 0xFF);
-        ConversationDiskRecord loaded;
-        check(store.get(name, loaded, error) == ConversationDiskStatus::corrupt, "a bad payload byte is corrupt");
-        check(store.records() == 0 && store.corruptions() == 1, "the store drops the corrupt record");
-        check(!std::filesystem::exists(file), "the corrupt file is removed");
-    }
-    // A flipped metadata byte.
-    {
-        ConversationDiskStore store = make();
-        std::string error;
-        patch_byte(file, 96 + 1, 0xFF);
-        ConversationDiskRecord loaded;
-        check(store.get(name, loaded, error) == ConversationDiskStatus::corrupt, "a bad metadata byte is corrupt");
-        check(!std::filesystem::exists(file), "the corrupt file is removed");
-    }
-    // A truncated file.
-    {
-        ConversationDiskStore store = make();
-        std::string error;
-        std::filesystem::resize_file(file, std::filesystem::file_size(file) - 1);
-        ConversationDiskRecord loaded;
-        check(store.get(name, loaded, error) == ConversationDiskStatus::corrupt, "a truncated record is corrupt");
-    }
-    // A bad version.
-    {
-        ConversationDiskStore store = make();
-        std::string error;
-        patch_byte(file, 8, 99);
-        ConversationDiskStore reopened;
-        check(reopened.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-              "the store reopens after a version change");
-        check(reopened.records() == 0 && reopened.corruptions() == 1, "the bad version is removed on open");
-    }
-    // A different identity.
-    {
-        ConversationDiskStore store = make();
-        std::string error;
-        ConversationDiskStore reopened;
-        check(reopened.open(options_for(directory, ConversationDiskIdentity::from_string("other"), 1ull << 30),
-                            error) == ConversationDiskStatus::ok,
-              "the store reopens under a new identity");
-        check(reopened.records() == 0 && reopened.corruptions() == 1,
-              "the foreign identity is removed on open");
-    }
+    std::string c1, c2;
+    chat_seed(12, "-a", c1, 80);
+    chat_seed(12, "-b", c2, 81);
+    const uint64_t chat_bytes = std::filesystem::file_size(dir / (c1 + ".conversation"));
+    check(store.records() == 3, "root + two chats fit");
+
+    // Phase 2: reopen the same directory with a budget that fits the root + ONE chat + the
+    // forcing self-contained chat.  Seeding the force then evicts the OLDEST unpinned chat;
+    // the referenced root stays.
+    ConversationDiskStore tight;
+    const uint64_t tight_budget = root_bytes + chat_bytes * 2 + 1;
+    check(tight.open(options_for(dir, ConversationDiskIdentity::from_string("test"), tight_budget), error) ==
+              ConversationDiskStatus::ok,
+          "a snug store reopens");
+    check(tight.records() == 3, "the snug store re-indexed everything");
+    SavedConversation other = full_image(6, 82);
+    ConversationDiskRecord other_rec;
+    other_rec.stages.push_back(make_delta_stage(other, 0, 4));
+    std::string oname = "c-other-" + std::to_string((unsigned long) getpid());
+    check(tight.seed(oname, std::move(other_rec), "", 0, error) == ConversationDiskStatus::ok,
+          "the forcing chat seeds");
+    check(tight.has(oname), "the forcing chat is in");
+    check(!tight.has(c1), "the oldest unpinned chat was evicted to make room");
+    check(tight.has(pname), "the referenced root is still pinned");
+    std::filesystem::remove_all(dir);
 }
 
-void test_disabled_and_invalid(const std::filesystem::path& directory) {
+void test_reopen_and_purge() {
+    std::filesystem::path dir = scratch_dir("reopen");
+    std::string error;
+    {
+        ConversationDiskStore store;
+        check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+                  ConversationDiskStatus::ok,
+              "a fresh store opens");
+        const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32), {}, true);
+        ConversationDiskRecord seed;
+        seed.stages.push_back(make_delta_stage(full_image(12), 0, 4));
+        check(store.seed(name, std::move(seed), "", 0, error) == ConversationDiskStatus::ok, "the seed parks");
+        ConversationDiskRecord d12;
+        d12.stages.push_back(make_delta_stage(full_image(24), 12, 4));
+        check(store.append(name, std::move(d12), error) == ConversationDiskStatus::ok, "an append parks");
+    }
+    // An invalid old-format file is purged at open.
+    std::filesystem::path garbage = dir / ("oldbad.conversation");
+    {
+        std::FILE* f = std::fopen(garbage.string().c_str(), "wb");
+        check(f != nullptr, "the garbage file opens");
+        for (int i = 0; i < 64; ++i) std::fwrite("garbage!", 1, 8, f);
+        std::fclose(f);
+    }
+    ConversationDiskStore store;
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "the store reopens the directory");
+    check(store.records() == 1, "one valid chain after reopen");
+    check(!std::filesystem::exists(garbage), "the garbage file was purged");
+    for (auto& p : std::filesystem::directory_iterator(dir)) {
+        std::string name = p.path().filename().string();
+        name = name.substr(0, name.size() - std::strlen(ConversationDiskStore::file_suffix));
+        ConversationDiskRecord back;
+        check(store.get(name, back, error) == ConversationDiskStatus::ok, "the reopened chain reads back");
+        check(back.stages[0].live.ids.size() == 24, "the reopened chain keeps both panels");
+    }
+    std::filesystem::remove_all(dir);
+}
+
+void test_two_stages() {
+    std::filesystem::path dir = scratch_dir("stages");
     ConversationDiskStore store;
     std::string error;
-    check(store.open(options_for(directory, ConversationDiskIdentity::from_string("off"), 0), error) ==
-              ConversationDiskStatus::disabled,
-          "a zero budget disables the store");
-    check(!store.enabled(), "the disabled store reports disabled");
-    ConversationDiskRecord record = make_record({1, 2, 3, 4}, 0x80, 128);
-    check(store.put(std::move(record), error) == ConversationDiskStatus::disabled,
-          "a disabled store refuses a put");
-    ConversationDiskRecord loaded;
-    check(store.get("c0000000000000000-0000000000000004", loaded, error) == ConversationDiskStatus::disabled,
-          "a disabled store refuses a get");
-    ConversationDiskMatch match;
-    check(!store.best({1, 2, 3, 4, 5}, {}, true, match), "a disabled store matches nothing");
-
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("invalid");
-    ConversationDiskStore live;
-    check(live.open(options_for(directory, identity, 1ull << 30), error) == ConversationDiskStatus::ok,
-          "the invalid-input store opens");
-    ConversationDiskRecord empty;
-    check(live.put(std::move(empty), error) == ConversationDiskStatus::invalid, "an empty record is invalid");
-    ConversationDiskRecord no_tokens = make_record({}, 0x90, 128);
-    check(live.put(std::move(no_tokens), error) == ConversationDiskStatus::invalid,
-          "a record without a live prefix is invalid");
-    ConversationDiskRecord small = make_record({4, 4, 4, 4}, 0x90, 128);
-    ConversationDiskOptions tight = options_for(directory, identity, 64);
-    ConversationDiskStore cramped;
-    check(cramped.open(tight, error) == ConversationDiskStatus::ok, "the tight store opens");
-    check(cramped.put(std::move(small), error) == ConversationDiskStatus::invalid,
-          "a record over the budget is invalid");
-    check(cramped.get("../escape", loaded, error) == ConversationDiskStatus::invalid,
-          "an unsafe name is invalid");
-    check(cramped.remove("..", error) == ConversationDiskStatus::invalid, "an unsafe remove is invalid");
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+    // A layer split: two stages with separate carves and run-states.
+    auto make2 = [&](size_t upto, int64_t first, uint8_t fill) {
+        ConversationDiskRecord rec;
+        SavedConversation full0 = full_image(upto, fill);
+        full0.layer_lo = 0;
+        full0.layer_hi = 20;
+        SavedConversation full1 = full_image(upto, static_cast<uint8_t>(fill + 10));
+        full1.layer_lo = 20;
+        full1.layer_hi = 40;
+        rec.stages.push_back(make_delta_stage(full0, first, 4));
+        rec.stages.push_back(make_delta_stage(full1, first, 4));
+        return rec;
+    };
+    const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 24), {}, true);
+    check(store.seed(name, make2(12, 0, 60), "", 0, error) == ConversationDiskStatus::ok,
+          "a two-stage seed parks");
+    check(store.append(name, make2(24, 12, 61), error) == ConversationDiskStatus::ok, "a two-stage append parks");
+    ConversationDiskRecord back;
+    check(store.get(name, back, error) == ConversationDiskStatus::ok, "a two-stage chain reads back");
+    check(back.stages.size() == 2, "both stages merge");
+    check(back.stages[0].live.ids == back.stages[1].live.ids, "the stages share the token chain");
+    check(back.stages[0].live.ids.size() == 24, "each stage has the full ids");
+    store.remove(name, error);
+    std::filesystem::remove_all(dir);
 }
 
-
-ConversationDiskRecord make_record_with_checkpoint(std::initializer_list<int32_t> ids,
-                                                   std::initializer_list<int32_t> ck_ids,
-                                                   uint8_t fill, size_t kv_bytes) {
-    ConversationDiskRecord record = make_record(ids, fill, kv_bytes);
-    ConversationCheckpoint checkpoint;
-    checkpoint.ids = ck_ids;
-    checkpoint.gdn.assign(8, fill);
-    record.stages[0].checkpoints.push_back(std::move(checkpoint));
-    return record;
-}
-
-void test_prefix_records(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("prefix");
-    ConversationDiskStore store;
-    std::string error;
-    // ~2.5 KiB: two of the records fit; every further record must evict one.  A 'p'-class prefix record
-    // is evicted only after every 'c' conversation record.
-    check(store.open(options_for(directory, identity, 2500), error) == ConversationDiskStatus::ok,
-          "the prefix store opens");
-    const std::string root_name = conversation_disk_prefix_name({2, 2, 2}, {}, true);
-    check(root_name[0] == 'p', "the prefix name carries the 'p' class");
-    check(root_name != conversation_disk_name({2, 2, 2}, {}, true),
-          "the prefix name differs from the conversation name of the same ids");
-    check(store.put(make_record({1, 1, 1, 1}, 0x40, 512), error) == ConversationDiskStatus::ok,
-          "the first conversation lands");
-    check(store.put(make_record({2, 2, 2}, 0x41, 128), error, true) == ConversationDiskStatus::ok,
-          "the root prefix lands pinned");
-    check(store.records() == 2 && store.has(root_name), "both records are indexed");
-    check(store.put(make_record({3, 3, 3, 3}, 0x42, 512), error) == ConversationDiskStatus::ok,
-          "a third conversation lands");
-    check(store.evictions() == 1, "exactly one eviction made room");
-    ConversationDiskMatch match;
-    check(store.best({2, 2, 2, 9}, {}, true, match), "the pinned prefix survives");
-    check(!store.best({1, 1, 1, 1, 9}, {}, true, match), "the oldest conversation was evicted first");
-    check(store.put(make_record({4, 4, 4}, 0x43, 128), error, true) == ConversationDiskStatus::ok,
-          "a second prefix lands");
-    check(store.evictions() == 2 && store.records() == 2, "a second prefix evicted the remaining conversation");
-    check(store.best({2, 2, 2, 9}, {}, true, match), "the first prefix is still there");
-    check(!store.best({3, 3, 3, 3, 9}, {}, true, match), "the second conversation is gone");
-    check(store.put(make_record({5, 5, 5, 5}, 0x44, 512), error) == ConversationDiskStatus::ok,
-          "a fourth conversation lands");
-    check(store.evictions() == 3 && !store.has(root_name),
-          "with only pinned records left, the LRU takes the oldest pinned prefix");
-    check(store.best({4, 4, 4, 9}, {}, true, match), "the surviving prefix still matches");
-    ConversationDiskRecord loaded;
-    check(store.get(match.name, loaded, error) == ConversationDiskStatus::ok, "the prefix record reads back");
-    check(loaded.stages[0].live.ids == std::vector<int32_t>({4, 4, 4}), "the prefix record holds the prefix");
-}
-
-void test_prefix_tie_break(const std::filesystem::path& directory) {
-    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("tie");
-    ConversationDiskStore store;
-    std::string error;
-    check(store.open(options_for(directory, identity, 1ull << 20), error) == ConversationDiskStatus::ok,
-          "the tie store opens");
-    check(store.put(make_record_with_checkpoint({1, 2, 3}, {1, 2}, 0x50, 512), error) == ConversationDiskStatus::ok,
-          "a conversation containing a {1,2} checkpoint lands");
-    const std::string prefix_name = conversation_disk_prefix_name({1, 2}, {}, true);
-    check(store.put(make_record({1, 2}, 0x51, 64), error, true) == ConversationDiskStatus::ok,
-          "the {1,2} prefix record lands");
-    ConversationDiskMatch match;
-    check(store.best({1, 2, 9}, {}, true, match), "a {1,2} prompt matches both records");
-    check(match.name == prefix_name, "an equal-length tie prefers the smaller prefix record");
-    check(match.tokens == 2, "the tie keeps the prefix length");
-}
 } // namespace
 
 int main() {
-    const std::filesystem::path root = std::filesystem::temp_directory_path() / "strata_conversation_disk_test";
-    std::error_code error_code;
-    std::filesystem::remove_all(root, error_code);
-    std::filesystem::create_directories(root, error_code);
-
-    test_checksum_and_identity();
-    test_name();
-    test_round_trip(root / "round_trip");
-    test_exact_images(root / "images");
-    test_multi_stage(root / "split");
-    test_recovery(root / "recovery");
-    test_eviction(root / "eviction");
-    test_prefix_records(root / "prefix");
-    test_prefix_tie_break(root / "tie");
-    test_caps_and_limits(root / "caps");
-    test_corruption(root / "corruption");
-    test_disabled_and_invalid(root / "disabled");
-
-    std::filesystem::remove_all(root, error_code);
-    std::printf("conversation_disk_test: %d checks passed\n", checks);
+    test_basic_chain();
+    test_root_base();
+    test_torn_tail();
+    test_rewind();
+    test_eviction_order();
+    test_reopen_and_purge();
+    test_two_stages();
+    std::fprintf(stderr, "conversation_disk_test: %d checks passed\n", checks);
     return 0;
 }

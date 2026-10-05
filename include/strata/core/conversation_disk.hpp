@@ -7,18 +7,23 @@
 // The store is CPU only. It makes no CUDA call. The caller captures and restores the images
 // with conversation_snapshot.hpp.
 //
-// One record holds one conversation. The record holds one SavedConversation per --layer-split
-// stage. A two-card run therefore parks and resumes as one unit. All stages must hold the same
-// token and image chain. Each stage keeps its own layer carve in layer_lo and layer_hi.
+// Each conversation is an append-only CHAIN: one file, a fixed master header followed by one
+// PANEL per park.  A park writes only the delta since the chain's last panel - the ids/imgs it
+// gained, new checkpoints, and per-layer K/V tails - so a growing conversation never rewrites
+// its history.  A self-contained chain covers tokens [0 .. N); a chain may instead reference a
+// shared system-prompt ('p') chain as its base, in which case its panels cover [root .. N) and
+// the root's K/V is stored once in the 'p' file.  Reading merges the base and the panels back
+// into full stage images, then hands them to the caller exactly like a one-record store.
 //
-// The record name is derived from the deepest token prefix. The same conversation always maps
-// to the same file name, so a re-park replaces the old file.
+// A torn append (crash mid-panel) is recovered on the next open: the panel checksum fails and
+// the file is truncated to the last complete panel, so the conversation survives to its previous
+// park - strictly better than a full-snapshot store, where a crash mid-write loses the record.
 //
 // Ownership and lifetime:
 //  * The store owns its index and its files.
-//  * put() consumes the record. The store writes it and the caller must not reuse it.
+//  * seed() and append() consume the record. The store writes it and the caller must not reuse it.
 //  * get() fills a record the caller owns. The record owns its buffers.
-//  * A ConversationDiskMatch holds a record name. That name stays valid until the next put()
+//  * A ConversationDiskMatch holds a record name. That name stays valid until the next mutation
 //    or remove(). The caller must call get() before then.
 //  * One thread uses one store. The store is synchronous and makes no lock.
 #pragma once
@@ -105,7 +110,7 @@ std::string conversation_disk_prefix_name(const std::vector<int32_t>& ids,
 
 class ConversationDiskStore {
 public:
-    static constexpr uint32_t format_version = 1;
+    static constexpr uint32_t format_version = 2;
     static constexpr const char* file_suffix = ".conversation";
 
     ConversationDiskStore() = default;
@@ -114,23 +119,43 @@ public:
     ConversationDiskStore(ConversationDiskStore&&) = default;
     ConversationDiskStore& operator=(ConversationDiskStore&&) = default;
 
-    // Opens the directory and rebuilds the index. Removes every file that fails validation.
-    // Returns disabled when budget_bytes is zero.
+    // Opens the directory and rebuilds the index. Removes every file that fails validation,
+    // including files from an older format and chains whose base record is gone.  A chain whose
+    // last panel is torn is truncated to its last complete panel instead (the crash recovery).
     ConversationDiskStatus open(const ConversationDiskOptions& options, std::string& error);
 
     bool enabled() const { return options_.budget_bytes != 0; }
 
-    // Finds the longest stored token prefix. It considers only records with the same cvec flag.
-    // A tie prefers the most recently used record. This call does no I/O and no allocation.
+    // Finds the longest stored token prefix. It considers only chains with the same cvec flag.
+    // A tie prefers the most recently used chain. This call does no I/O and no allocation.
     bool best(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& images,
               bool cvec, ConversationDiskMatch& match) const;
 
-    // Publishes the record. Replaces a record with the same name. Consumes the record in all cases.
-    // A prefixed record (`prefix = true`) has a 'p'-class name and is evicted after conversations.
-    ConversationDiskStatus put(ConversationDiskRecord&& record, std::string& error, bool prefix = false);
+    // Publishes a NEW chain: one self-contained panel covering [0 .. end) OR, when `base_name`
+    // is non-empty, a panel covering [base_tokens .. end) whose earlier tokens the named 'p'
+    // chain contributes (base_tokens == that chain's coverage; it is pinned while this chain
+    // lives).  `name` must be the caller's stable chain key (the record name of the seed
+    // content).  Replaces a chain with the same name.  Consumes the record in all cases.
+    ConversationDiskStatus seed(const std::string& name, ConversationDiskRecord&& record,
+                                std::string base_name, uint64_t base_tokens, std::string& error);
 
-    // Loads a record into RAM. Validates the metadata before it allocates. Verifies the payload
-    // checksum while it streams. Removes the file on corruption.
+    // Appends one panel to an existing chain: the delta record covers [the chain's current
+    // coverage .. its ids length later).  Returns miss when the chain is gone (the caller then
+    // seeds it again).  Consumes the record in all cases except `invalid`.
+    ConversationDiskStatus append(const std::string& name, ConversationDiskRecord&& record,
+                                  std::string& error);
+
+    // The token coverage of a chain (its latest panel's end), or false when it is not indexed.
+    bool cover(const std::string& name, uint64_t& tokens) const;
+
+    // Rewinds a chain to at most `at` tokens: drops every panel whose end exceeds `at`.
+    // `new_cover` is the deepest kept panel's end (the caller then re-captures the delta from
+    // there, or reseeds from the chain's base).  No-op when the chain already covers `at`.
+    ConversationDiskStatus rewind_chain(const std::string& name, uint64_t at, uint64_t& new_cover,
+                                        std::string& error);
+
+    // Loads a chain into RAM: resolves the base, merges every panel, validates each panel's
+    // checksums while it streams, and truncates a torn tail.  Removes the file on corruption.
     ConversationDiskStatus get(const std::string& name, ConversationDiskRecord& record, std::string& error);
     bool has(const std::string& name) const { return find(name) != nullptr; }
 
@@ -144,12 +169,16 @@ public:
     const std::filesystem::path& directory() const { return options_.directory; }
 
 private:
-    // The in-RAM index of one record. The points hold ids and imgs only, never payload bytes.
+    // The in-RAM index of one chain. The points hold ids and imgs only, never payload bytes.
     struct Entry {
         std::string name;
         uint64_t bytes = 0;
         uint64_t stamp = 0;
+        uint64_t cover = 0;            ///< tokens the chain covers at its last write
         bool cvec = true;
+        bool root = false;             ///< a system-prompt ('p') chain: evicted after conversations
+        size_t refs = 0;               ///< chat chains whose base this root is (roots only)
+        std::string base;              ///< the referenced 'p' chain's name, or empty
         std::vector<ConversationCheckpoint> points;
     };
 
@@ -159,10 +188,29 @@ private:
     Entry* find(const std::string& name);
     size_t lru_victim(const std::string& skip) const;
     void evict(size_t index);
-    ConversationDiskStatus make_room(uint64_t incoming, uint64_t replaced, const std::string& skip,
+    ConversationDiskStatus make_room(uint64_t incoming, const std::string& skip, bool adds_record,
                                      std::string& error);
     ConversationDiskStatus index_file(const std::filesystem::path& path, const std::string& name,
                                       Entry& entry, std::string& error) const;
+    // Truncates a torn last panel (a crash mid-append) back to the chain's previous coverage and
+    // re-indexes the entry.  Returns false when the tail is intact or the file does not validate.
+    bool truncate_torn_tail(const std::string& name);
+    // The referenced 'p' chain's full ids/imgs from the index (its final match point).
+    bool base_ids(const std::string& base_name, std::vector<int32_t>& ids,
+                  std::vector<ConversationImageKey>& imgs, std::string& error) const;
+    // Same, by reading the base chain's metadata directly (used at open(), when the index may not
+    // be ordered yet; depth is limited to one root level).
+    ConversationDiskStatus base_ids_from_file(const std::string& base_name, std::vector<int32_t>& ids,
+                                              std::vector<ConversationImageKey>& imgs,
+                                              std::string& error) const;
+    // Loads one chain file into `out`.  A referenced 'p' base is resolved through the same path
+    // (depth is limited to one root level).  Panels are merged in order; a torn tail is detected
+    // by its checksum and dropped.
+    ConversationDiskStatus read_chain(const std::filesystem::path& path, int depth,
+                                      ConversationDiskRecord& out, std::string& error) const;
+    static ConversationDiskStatus read_chain_impl(const std::filesystem::path& path,
+                                                  const ConversationDiskStore& self, int depth,
+                                                  ConversationDiskRecord& out, std::string& error);
 
     ConversationDiskOptions options_{};
     std::vector<Entry> entries_;
