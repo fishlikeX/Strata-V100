@@ -377,6 +377,76 @@ ConversationRestore conversation_stage_restore(const SavedConversation& image, S
     return ConversationRestore::restored;
 }
 
+// ---- The L3 disk tier's delta image (append-only chains).  A park captures ONLY what the conversation
+// gained since its chain's last panel: the ids/imgs after first_token, the session's current (fixed-size)
+// running state, checkpoints newer than first_token, and per-layer K/V tails.  The store merges the chain
+// back into full images on read; the merged image is validated with the normal snapshot validation.
+bool conversation_disk_delta_bytes(const ConversationView& view, const SessionState& ss,
+                                   const ModelGeometry& g, const QsaState* draft, int64_t first_token,
+                                   size_t& bytes, std::string& error) {
+    bytes = 0;
+    if (first_token < 0 || (uint64_t) first_token > view.ids.size())
+        return fail(error, "invalid delta base");
+    ConversationStateSizes z;
+    if (!conversation_session_sizes(g, ss, z, error)) return false;
+    const size_t fresh = view.ids.size() - (size_t) first_token;
+    size_t ids = 0, images = 0, checkpoints = 0, layers = 0, tails = 0, dead = 0, positions = 0;
+    const auto qsa = (uint64_t) owned_qsa(ss);
+    if (!product(ids, {fresh, sizeof(int32_t)}) ||
+        !product(checkpoints, {view.checkpoints.size(), sizeof(ConversationCheckpoint)}) ||
+        !product(layers, {qsa + (draft ? 1 : 0), sizeof(ConversationKv)}) ||
+        !product(tails, {qsa, z.tail}) || !product(dead, {qsa, z.dead}) ||
+        !product(positions, {qsa, z.block_pos})) return fail(error, "delta metadata byte count overflow");
+    for (const auto& key : view.images)
+        if (key.start >= first_token && !add(images, sizeof(ConversationImageKey)))
+            return fail(error, "delta image byte count overflow");
+    for (size_t n : {ids, images, checkpoints, layers, tails, dead, positions, z.gdn, ss.ple_hist ? z.ple : 0})
+        if (!add(bytes, n)) return fail(error, "delta byte count overflow");
+    for (const auto& c : view.checkpoints)
+        if ((int64_t) c.ids.size() > first_token && !metadata_bytes(c, bytes))
+            return fail(error, "delta checkpoint byte count overflow");
+    const int64_t upto = (int64_t) view.ids.size();
+    for (uint64_t i = 0; i < qsa + (draft ? 1 : 0); ++i) {
+        const auto& st = i == qsa ? *draft : owned(ss, (size_t) i);
+        const int64_t first = i == qsa ? std::max<int64_t>(0, first_token - 1) : first_token;
+        const size_t n = conversation_kv_tail_bytes(st, g, upto, i != qsa, first);
+        if (!n || !add(bytes, n)) return fail(error, "invalid or overflowing delta K/V estimate");
+    }
+    return true;
+}
+
+bool conversation_disk_delta_save(SavedConversation& out, const ConversationView& view,
+                                  const SessionState& ss, const ModelGeometry& g, const QsaState* draft,
+                                  int64_t first_token, std::string& error) {
+    if (first_token < 0 || (uint64_t) first_token > view.ids.size())
+        return fail(error, "invalid delta base");
+    if (!sync(error)) return false;
+    out = {};
+    out.geometry = geometry_key(g);
+    out.layer_lo = ss.layer_lo;
+    out.layer_hi = ss.layer_hi;
+    out.cvec = view.cvec;
+    // The live checkpoint's ids are the SLICE after first_token: the store concatenates the chain's
+    // slices back into the full token list on read, and the merged image validates normally.
+    out.live.ids.assign(view.ids.begin() + first_token, view.ids.end());
+    for (const auto& key : view.images)
+        if (key.start >= first_token) out.live.imgs.push_back(key);
+    for (const auto& c : view.checkpoints)
+        if ((int64_t) c.ids.size() > first_token) out.checkpoints.push_back(c);
+    const size_t layers = owned_qsa(ss);
+    out.kv.resize(layers + (draft ? 1 : 0));
+    if (!conversation_checkpoint_save(out.live, ss, g, error)) return false;
+    const int64_t upto = (int64_t) view.ids.size();
+    for (size_t j = 0; j < layers; ++j)
+        if (!conversation_kv_tail_save(out.kv[j], owned(ss, j), g, upto, true, first_token, error)) return false;
+    // The draft ring's final cell may not have been computed when the output cap was reached; its tail
+    // starts one token early so the next park refreshes that page (the same rule as the whole-image save's
+    // `max(unchanged - 1, 0)`).
+    if (draft && !conversation_kv_tail_save(out.kv.back(), *draft, g, upto, false,
+                                            std::max<int64_t>(0, first_token - 1), error)) return false;
+    return true;
+}
+
 // the draft layer's K/V included (the stage that owns the draft head, or no layer split)
 bool conversation_snapshot_bytes(const ConversationView& view, const SessionState& ss, const ModelGeometry& g,
                                  const QsaState& draft, size_t& bytes, std::string& error) {

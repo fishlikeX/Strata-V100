@@ -178,6 +178,62 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
     return true;
 }
 
+size_t conversation_kv_tail_bytes(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index,
+                                  int64_t first_token) {
+    std::string error;
+    ConversationKv image;
+    if (!conversation_kv_tail_save(image, st, g, upto, index, first_token, error)) return 0;
+    return image.bytes();
+}
+
+// Saves only the K/V bytes at or after the page containing `first_token`.  The image's buffers hold the
+// tail; `cells` and the geometry fields describe the full extent `upto`, so the L3 disk store can splice
+// the tail after an earlier base.  The overlap page (containing both saved and new cells) is recopied
+// whole - exactly what the RAM-cache reuse path copies when `unchanged_tokens` cuts it.
+bool conversation_kv_tail_save(ConversationKv& image, const QsaState& st, const ModelGeometry& g,
+                               int64_t upto, bool index, int64_t first_token, std::string& error) {
+    Layout l{};
+    if (!layout(st, g, upto, index, l, error)) return false;
+    if (!valid(st, l, upto, error)) return false;
+    if (first_token < 0 || first_token > upto) {
+        error = "conversation snapshot: invalid tail start";
+        return false;
+    }
+    const auto s = strata::kernels::qsa_real_shapes();
+    const int64_t whole_cells = (first_token / l.page_size) * l.page_size;
+    image.format = l.format;
+    image.cells = l.cells;
+    image.heads = g.n_head_kv;
+    image.head_dim = g.head_dim;
+    image.page_size = l.page_size;
+    image.pooled_rows = l.pooled_rows;
+    image.idx_dim = g.idx_key_dim;
+    // The layout-unit offset where each section's bytes begin in the FINAL image: the page-capped
+    // cell for the four K/V buffers, the completed pooled rows for the indexer (none for the
+    // draft layer), so the L3 disk store can place this tail without re-deriving the layout.
+    image.first_units[0] = whole_cells;
+    image.first_units[1] = whole_cells;
+    image.first_units[2] = whole_cells;
+    image.first_units[3] = whole_cells;
+    image.first_units[4] = index ? first_token / s.idx_block : 0;
+    const auto src = pools(st);
+    const std::array<size_t,5> sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
+    const std::array<ConversationBuffer*,5> dst = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
+    for (size_t i = 0; i < dst.size(); ++i) {
+        // The same boundary conversation_kv_save keeps when an unchanged prefix ends at `first_token`:
+        // page-aligned for the four K/V buffers, the indexer's completed rows for the pooled spare.
+        const size_t keep = i == 4 ? (index ? size_t(first_token / s.idx_block) * g.idx_key_dim * 4 : 0)
+                                  : l.cells ? (sizes[i] / size_t(l.cells)) * size_t(whole_cells) : 0;
+        if (keep > sizes[i]) { error = "conversation snapshot: invalid tail size"; return false; }
+        const size_t n = sizes[i] - keep;
+        dst[i]->resize(n);
+        if (!dst[i]->visit(0, n, [&](uint8_t* p, size_t chunk, size_t at) {
+                return transfer(p, src[i] ? static_cast<const uint8_t*>(src[i]) + keep + at : nullptr, chunk, error);
+            })) return false;
+    }
+    return true;
+}
+
 bool conversation_kv_validate(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                               int64_t upto, bool index, std::string& error) {
     Layout l{};

@@ -135,15 +135,41 @@ The conversation state has three tiers. Tier 1 (L1) is the live session in GPU m
 
 To use the disk store, add `--conversation-cache-disk strata-conversations --conversation-cache-disk-gib 25` to the engine arguments. The path and a positive GiB budget are required together. The store is off by default, it needs `--serve`, it works with `--conversation-cache-mib 0`, and it supports `--layer-split` on multiple GPUs. Optional: `--conversation-cache-disk-slots N` caps the record count, and `--conversation-cache-disk-min-free-mib N` keeps free space on the filesystem.
 
-A record is reused only when the prompt starts with exactly its tokens and images and its control-vector mode matches. The engine picks the longest valid prefix across the live session, the RAM cache, the disk records and the idle batch slots, so a shorter disk record never displaces a longer resident state. The files are checksummed and versioned, the engine writes each one through a temporary file, and it removes invalid files at startup. The store evicts the least recently used record when it reaches its byte budget, its record cap, or the free-space floor. A corrupt or incompatible record is removed, and the request falls back to normal prompt processing.
+Every conversation is an append-only CHAIN: one file, a fixed master header followed by one PANEL
+per park.  A park writes only the DELTA the conversation gained since its last park - the new
+token ids, new checkpoints, the current running state, and the new K/V pages (a full-snapshot
+store rewrote the whole conversation every turn; this one never does).  A chain may instead
+reference a shared system-prompt ('p') record as its BASE, in which case the system prompt's K/V
+is stored once and every chat's file holds only the chat's tail.  A record/panel is reused only
+when the prompt starts with exactly its tokens and images and its control-vector mode matches.
+The engine picks the longest valid prefix across the live session, the RAM cache, the disk
+chains and the idle batch slots, so a shorter disk record never displaces a longer resident
+state.  Panels are checksummed and versioned; the seed (first panel) writes through a temporary
+file and renames it into place, and appends write at the end of the chain and patch the master
+header.  A torn append (a crash mid-panel) is recovered on the next read by truncating back to
+the last complete panel, so the conversation survives to its previous park - strictly better
+than a full-snapshot store, where a crash mid-write lost the whole record.  Invalid files from
+older formats are removed at startup.  The store evicts the least recently used chain when it
+reaches its byte budget, its record cap, or the free-space floor; a referenced system-prompt
+base is pinned while any chat chain lives.  A corrupt or incompatible chain is removed, and the
+request falls back to normal prompt processing.
 
 A shared system prompt gets its own small record. When a fresh chat is first read from token 0, the engine checkpoints the end of the system prompt (the first turn boundary; `--prompt-cache-root`, default 2048 tokens) and captures that prefix once into each enabled tier as a **system-prompt root image**. The root is pinned: the RAM cache and the disk LRU evict it only after every parked conversation, and an equal-length match prefers it because restoring it reads only the shared prefix (the 24k) instead of the longer conversation record that contains it (the 80k). `--conversation-cache-keep-root` and `--conversation-cache-disk-keep-root` (both default on) pin the root per tier; their `--no-` variants turn that tier's pin off. The capture runs only when the prefix is missing from a tier, so the shared bytes are written once, not once per chat.
 
-The disk tier accelerates conversation alternation and server restarts. It does not itself add concurrent execution. Use `"parallel": 2` for parallel requests; see [batch slots](docs/BATCHING.md) for memory costs and limits. GPU capture must complete before the active session is overwritten, but the file write runs asynchronously while the next request uses the GPUs. Restore is synchronous. Save and restore stage the record in host RAM, and the engine releases that memory after the file operation. Each park writes a full record to the storage device, so frequent switching consumes flash write endurance; stop the server and delete the directory to clear the cache. Size the GiB budget for the conversations you want to keep, not for one record. See [details](docs/DETAILS.md#using-it) for the full behavior, limits, and sizing guidance.
+The disk tier accelerates conversation alternation and server restarts. It does not itself add concurrent execution. Use `"parallel": 2` for parallel requests; see [batch slots](docs/BATCHING.md) for memory costs and limits. GPU capture must complete before the active session is overwritten, but the file write runs asynchronously while the next request uses the GPUs; a park with nothing new since the last panel writes NOTHING (zero I/O). Restore is synchronous. Save and restore stage the delta in host RAM, and the engine releases that memory after the file operation. A park appends only the delta (plus the model's fixed running state), so frequent switching no longer flattens the drive a full record at a time; one chain file per conversation grows in place. Size the GiB budget for the number of conversations you keep, not for one conversation's repeated full snapshots. See [details](docs/DETAILS.md) and [the benchmark report](benchmarks/v100-l3-conversation-cache-2026-10-03.md) for measured numbers.
 
 #### Measured V100 result
 
 On this fork's two-V100, layer-split configuration, resuming a 33,725-token conversation from a 25 GiB NVMe cache took 1,614.6 ms to read and 315.8 ms to restore. The complete resumed prompt phase, including 22 new tokens, took 3,015.1 ms. A cold read of the same 33,725-token prefix took 20,332.7 ms. This is a **6.74x speed-up** and an **85.2% prompt-latency reduction** for the resumed request. The 943.6 MiB record restored byte-exact main-model state and identical output across both GPUs. Restart recovery passed byte-exact parity, and corrupt-record fallback produced matching output. See [the benchmark report](benchmarks/v100-l3-conversation-cache-2026-10-03.md).
+
+Measured on this fork's two-V100 layer-split rig (Qwen3.8-Flash-Next Q2_0, int8 KV): two
+conversations alternating through a scratch cache served correctly across 8 requests with
+`corruptions=0 evictions=0`; one chain file per conversation grew 238 MiB -> 594 MiB across
+three parks of +12 new tokens each (a full-snapshot store would have written a fresh ~2.4 GiB
+file per park at 100k+ tokens).  The first park of a fresh short chat seeds the chain
+(~118 MiB: one K/V page per layer plus the model's fixed running state); afterwards every park
+is the delta (+12 tokens ~ 118 MiB) and the read-back/restore path is unchanged (~0.4 s to read,
+~0.04-0.08 s to restore).
 
 ### Lazy vision (opt-in)
 

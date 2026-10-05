@@ -43,6 +43,10 @@ struct ConversationCheckpoint {
 struct ConversationKv {
     int format = 0;
     int64_t cells = 0, heads = 0, head_dim = 0, page_size = 0, pooled_rows = 0, idx_dim = 0;
+    // The layout-unit offset where each of the 5 sections' bytes begin in the FINAL image (the
+    // L3 disk tier's tail capture: page-capped cells for k/v/scales, pooled rows for the indexer,
+    // one page earlier for the draft layer).  0 in a full-capture image.
+    std::array<int64_t, 5> first_units{};
     ConversationBuffer k, v, k_scale, v_scale, pooled;
     size_t bytes() const {
         return k.bytes() + v.bytes() + k_scale.bytes() + v_scale.bytes() + pooled.bytes();

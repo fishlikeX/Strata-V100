@@ -1129,23 +1129,33 @@ The disk tier preserves parked conversations across alternation and across resta
 It does not itself add concurrent execution. Set `"parallel": N` to enable batch slots;
 see [BATCHING.md](BATCHING.md) for their memory costs and limits.
 
-**Disk endurance and sizing.** Each park writes a full record to the storage device. A record
-holds the session state, the checkpoints, the used K/V pages, and the draft-layer K/V of one
-conversation. Its size grows with the context, the KV format, the number of checkpoints, the
-draft layer, and the number of split stages, so it is larger than one RAM checkpoint. Frequent
-conversation switching and frequent restarts write many records. On a flash device this
-consumes write endurance. Use a directory on a device that you can write to, and stop the
-server before you delete the directory to clear the cache; the engine rebuilds an empty index
-at the next start.
+**Disk endurance and sizing.** A conversation is an append-only CHAIN: one file, a fixed master
+header and one PANEL per park.  A park captures and appends only the DELTA the conversation
+gained since its last panel - the new token ids, new checkpoints, the current running state, and
+the new K/V pages (a full-snapshot store rewrote the whole record every turn).  A panel's seed
+(first park) writes through a temporary file and renames it into place; appends write at the end
+of the chain and patch the master header.  A torn append (a crash mid-panel) is detected by its
+payload checksum on the next read and truncated back to the last complete panel, so the
+conversation survives to its previous park.  A park with nothing new since the last panel writes
+nothing.
 
-A record name comes from the deepest parked token prefix. A re-park at the same prefix
-replaces that file; a park at a longer prefix adds a record. Records that no request uses stay
-until eviction.
+The delta's size grows with the new context, the KV format, the number of split stages, and the
+model's fixed running state (e.g. the SSM/gdn recurrence), not with the whole conversation, so
+frequent switching no longer flattens the drive a full record at a time.  One chain file per
+conversation grows in place; the 50 GiB budget holds ~20 distinct conversations instead of 20
+copies of one.  On a flash device this still consumes endurance in proportion to the deltas you
+write.  Use a directory on a device that you can write to, and stop the server before you delete
+the directory to clear the cache; the engine rebuilds an empty index at the next start.
 
-Size the budget for the conversations that you want to keep across restarts, not for one
-record. A 25 GiB budget is an example: it holds a few large conversations at a long context,
-or many smaller ones. Set `--conversation-cache-disk-min-free-mib` to protect the free space
-of the filesystem, and `--conversation-cache-disk-slots` when you want a hard record count.
+A chain's name comes from the token prefix at its seed.  A re-seed at the same name replaces the
+chain; a rewind truncates it to the deepest complete panel and continues from there.  Chains no
+request uses stay until eviction.
+
+Size the budget for the number of conversations that you want to keep across restarts, not for
+one conversation's repeated full snapshots.  A 25 GiB budget is an example: it holds a few large
+conversations at a long context, or many smaller ones.  Set `--conversation-cache-disk-min-free-mib`
+to protect the free space of the filesystem, and `--conversation-cache-disk-slots` when you want
+a hard chain count.
 The engine log reports each park and restore with its byte size and its time, and the hit,
 miss, eviction, and corruption counts. Read it to size the budget for your workload.
 
