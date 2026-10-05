@@ -542,6 +542,12 @@ struct Options {
     int64_t conversation_cache_disk_gib = 0;          // the file budget in GiB (> 0)
     int conversation_cache_disk_slots = 0;            // the record cap (0 = no cap)
     int64_t conversation_cache_disk_min_free_mib = 0; // the free-space floor the store keeps (0 = none)
+    /// --serve: pin the shared system-prompt (chain-root) prefix in the RAM cache: the prefix image is
+    /// evicted after every parked conversation (default on)
+    bool conversation_cache_keep_root = true;
+    /// --serve: give the shared system-prompt (chain-root) prefix a 'p'-class record in the L3 disk store:
+    /// the LRU evicts it after every conversation record (default on)
+    bool conversation_cache_disk_keep_root = true;
     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
     int64_t prompt_cache_every = 16384;
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
@@ -662,6 +668,10 @@ void usage() {
                  "  --conversation-cache-disk-gib N  --serve: the disk store's file budget in GiB (> 0)\n"
                  "  --conversation-cache-disk-slots N  --serve: at most N records on disk (default 0 = no cap)\n"
                  "  --conversation-cache-disk-min-free-mib N  --serve: free-space floor the store keeps (default 0)\n"
+                 "  --conversation-cache-keep-root / --no-conversation-cache-keep-root  --serve: pin the shared\n"
+                 "                       system-prompt prefix in the RAM cache (evicted after conversations; default on)\n"
+                 "  --conversation-cache-disk-keep-root / --no-conversation-cache-disk-keep-root  --serve: keep the\n"
+                 "                       system-prompt prefix record on disk after conversation records (default on)\n"
                  "  --vram-elastic       --serve (#533, opt-in, NVIDIA): the expert caches in segments (--vram-segment-mib,\n"
                  "                       default 512), so the command `VRAM <reserve_mib>` (the server's POST /v1/vram) can\n"
                  "                       give VRAM back to other programs between requests and take it back later; a layer\n"
@@ -1591,6 +1601,10 @@ int main(int argc, char** argv) {
             else if (a == "--conversation-cache-disk-min-free-mib") o.conversation_cache_disk_min_free_mib = number;
             else o.conversation_cache_disk_slots = (int) number;
         }
+        else if (a == "--conversation-cache-keep-root") o.conversation_cache_keep_root = true;
+        else if (a == "--no-conversation-cache-keep-root") o.conversation_cache_keep_root = false;
+        else if (a == "--conversation-cache-disk-keep-root") o.conversation_cache_disk_keep_root = true;
+        else if (a == "--no-conversation-cache-disk-keep-root") o.conversation_cache_disk_keep_root = false;
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
@@ -5660,6 +5674,7 @@ int main(int argc, char** argv) {
             double write_ms = 0.0;
             size_t tokens = 0;
             size_t snapshot_bytes = 0;
+            bool root = false;              // a shared system-prompt prefix record, not a conversation park
         };
         std::optional<std::future<DiskWriteResult>> pending_disk_write;
         auto finish_disk_write = [&]() {
@@ -5673,8 +5688,9 @@ int main(int argc, char** argv) {
                              (unsigned long long) disk.bytes());
                 return;
             }
-            std::fprintf(stderr, "strata serve: conversation disk: parked %zu tokens in %.1f ms; records=%zu "
-                                 "bytes=%llu evictions=%llu corruptions=%llu snapshot_bytes=%zu\n",
+            std::fprintf(stderr, "strata serve: conversation disk: %s %zu tokens in %.1f ms; records=%zu "
+                         "bytes=%llu evictions=%llu corruptions=%llu snapshot_bytes=%zu\n",
+                         result.root ? "root parked" : "parked",
                          result.tokens, result.capture_ms + result.write_ms, disk.records(),
                          (unsigned long long) disk.bytes(), (unsigned long long) disk.evictions(),
                          (unsigned long long) disk.corruptions(), result.snapshot_bytes);
@@ -5949,6 +5965,110 @@ int main(int argc, char** argv) {
                 checks.erase(checks.begin() + (std::ptrdiff_t) victim);
             }
             return true;
+        };
+        // The shared system-prompt prefix record: when a fresh chat's read has just checkpointed its root
+        // boundary (the end of the system prompt), capture that prefix ONCE and give it priority in each
+        // enabled tier.  A later new chat with the same system prompt restores this small image instead of
+        // the longer conversation record that contains it.  Skipped when the prefix is already in every tier
+        // that wants it: the bytes are identical for every chat of the same system prompt, so a repeat
+        // would only rewrite them.  Never fatal: a skipped capture costs a read, not a wrong answer.
+        auto park_root = [&](int64_t L) {
+            if (L < 1) return;
+            const bool l2_want = conversations.enabled() && o.conversation_cache_keep_root;
+            const bool l3_want = disk_enabled && o.conversation_cache_disk_keep_root;
+            if (!l2_want && !l3_want) return;
+            std::vector<int32_t> prefix((size_t) L);
+            for (int64_t i = 0; i < L; ++i) prefix[(size_t) i] = (int32_t) cur[(size_t) i];
+            const std::vector<ImgKey> prefix_imgs = imgs_below(req_imgs, L);
+            const std::string pname = strata::core::conversation_disk_prefix_name(prefix, prefix_imgs, cvec_cached);
+            finish_disk_write();   // one in-flight disk write at a time; this joins the previous one
+            const bool l2_have = conversations.has(prefix, prefix_imgs, cvec_cached);
+            const bool l3_have = disk.has(pname);
+            if ((!l2_want || l2_have) && (!l3_want || l3_have)) return;
+            const auto t0 = Clock::now();
+            std::string derr;
+            try {
+                strata::core::ConversationDiskRecord record;
+                record.stages.resize(disk_stage_count);
+                bool ok = true;
+                for (size_t i = 0; ok && i < record.stages.size(); ++i) {
+                    const strata::core::OnDevice on(stage_device(i));
+                    const strata::core::ConversationView view{prefix, prefix_imgs, {}, cvec_cached};
+                    strata::core::SessionState& session = stage_session(i);
+                    ok = owns_draft(i)
+                        ? strata::core::conversation_snapshot_save(record.stages[i], view, session, g, mtp.kv_state(), derr)
+                        : strata::core::conversation_stage_save(record.stages[i], view, session, g, derr);
+                }
+                for (size_t i = 0; ok && i < record.stages.size(); ++i) {
+                    const strata::core::OnDevice on(stage_device(i));
+                    strata::core::SessionState& session = stage_session(i);
+                    const bool valid = owns_draft(i)
+                        ? strata::core::conversation_snapshot_validate(record.stages[i], session, g, mtp.kv_state(), derr)
+                        : strata::core::conversation_stage_validate(record.stages[i], session, g, derr);
+                    if (!valid) {
+                        std::fprintf(stderr, "strata serve: conversation cache: skip root parking (%s)\n", derr.c_str());
+                        return;
+                    }
+                }
+                const size_t ram_bytes = record.bytes();
+                const size_t tokens = (size_t) L;
+                if (l3_want) {
+                    pending_disk_write.emplace(std::async(std::launch::async,
+                        [&disk, record = std::move(record), tokens, ram_bytes]() mutable {
+                            DiskWriteResult result;
+                            result.root = true;
+                            result.tokens = tokens;
+                            result.snapshot_bytes = ram_bytes;
+                            const auto write_at = Clock::now();
+                            try {
+                                result.status = disk.put(std::move(record), result.error, true);
+                            } catch (const std::exception& e) {
+                                result.status = strata::core::ConversationDiskStatus::failed;
+                                result.error = e.what();
+                            } catch (...) {
+                                result.status = strata::core::ConversationDiskStatus::failed;
+                                result.error = "unknown exception";
+                            }
+                            result.write_ms = std::chrono::duration<double, std::milli>(Clock::now() - write_at).count();
+                            return result;
+                        }));
+                }
+                if (l2_want) {
+                    const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
+                    if (!strata::core::conversation_memory_admit(strata::core::conversation_available_memory(),
+                            ram_bytes, floor)) {
+                        std::fprintf(stderr, "strata serve: conversation cache: skip root parking (physical RAM admission)\n");
+                        return;
+                    }
+                    strata::core::SavedConversation image;
+                    const strata::core::ConversationView view{prefix, prefix_imgs, {}, cvec_cached};
+                    const strata::core::QsaState* main_draft = stages.empty() ? &mtp.kv_state()
+                                              : (owns_draft(0) ? &mtp.kv_state() : nullptr);
+                    if (!strata::core::conversation_snapshot_save(image, view, ss, g, main_draft, derr)) {
+                        std::fprintf(stderr, "strata serve: conversation cache: skip root parking (%s)\n", derr.c_str());
+                        return;
+                    }
+                    for (size_t k = 0; k < stages.size(); ++k) {
+                        auto& st = stages[k];
+                        const strata::core::OnDevice on(st->dev);
+                        if (cudaDeviceSynchronize() != cudaSuccess) { derr = "stage sync failed"; return; }
+                        const strata::core::QsaState* sd = owns_draft(k + 1) ? &mtp.kv_state() : nullptr;
+                        strata::core::SavedConversation part;
+                        if (!strata::core::conversation_snapshot_save(part, view, st->ss, g, sd, derr)) {
+                            std::fprintf(stderr, "strata serve: conversation cache: skip root parking (%s)\n", derr.c_str());
+                            return;
+                        }
+                        image.stage_images.push_back(std::move(part));
+                    }
+                    const bool stored = conversations.put(std::move(image), 0, true);
+                    std::fprintf(stderr, "strata serve: conversation cache: %s root %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu\n",
+                                 stored ? "parked" : "skipped", tokens,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                                 conversations.size(), conversations.bytes(), conversations.evictions(), ram_bytes);
+                }
+            } catch (const std::bad_alloc&) {
+                std::fprintf(stderr, "strata serve: conversation cache: root capture allocation failed; skip\n");
+            }
         };
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             std::vector<int32_t> nxt((size_t) T);
@@ -6278,7 +6398,8 @@ int main(int argc, char** argv) {
                         "conversation_cache_min_free_mib=%lld tail_role_token=%lld vram_elastic=%d "
                         "conversation_cache_disk=%d conversation_cache_disk_gib=%lld conversation_cache_disk_records=%zu "
                         "conversation_cache_disk_bytes=%llu conversation_cache_disk_recoveries=%llu "
-                        "conversation_cache_disk_corruptions=%llu%s engine=" STRATA_VERSION "\n",
+                        "conversation_cache_disk_corruptions=%llu conversation_cache_keep_root=%d "
+                        "conversation_cache_disk_keep_root=%d%s engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
@@ -6294,6 +6415,7 @@ int main(int argc, char** argv) {
                         disk_enabled ? 1 : 0, (long long) o.conversation_cache_disk_gib,
                         disk.records(), (unsigned long long) disk.bytes(),
                         (unsigned long long) disk.recoveries(), (unsigned long long) disk.corruptions(),
+                        o.conversation_cache_keep_root ? 1 : 0, o.conversation_cache_disk_keep_root ? 1 : 0,
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0)).c_str() : "");
         }
@@ -7897,6 +8019,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
                     return 1;
                 }
+                if (to == root_at) park_root(to);   // never fatal: a skipped root record costs a read
             }
             if (!refill(err)) {
                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());

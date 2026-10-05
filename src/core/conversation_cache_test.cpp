@@ -19,9 +19,60 @@ SavedConversation image(std::initializer_list<int32_t> ids, bool cvec = true) {
     s.cvec = cvec;
     return s;
 }
+SavedConversation image_with_checkpoint(std::initializer_list<int32_t> live_ids,
+                                        std::initializer_list<int32_t> ck_ids) {
+    SavedConversation s = image(live_ids);
+    ConversationCheckpoint c;
+    c.ids = ck_ids;
+    c.gdn.resize(64, 7);
+    s.checkpoints.push_back(std::move(c));
+    return s;
+}
+
+void test_root_priority() {
+    // The shared system-prompt prefix: parked pinned, deduplicated, evicted after conversations, and
+    // preferred at an equal-length tie because it is the smaller image.
+    const size_t one = image({1, 2}).bytes();
+    {
+        ConversationCache cache(one * 8, 8);
+        check(cache.put(image({1, 2}), 0, true), "the root prefix parks pinned");
+        check(cache.put(image({5, 6, 7})), "a chat parks unpinned");
+        check(cache.size() == 2, "pinned and unpinned entries coexist");
+        check(cache.put(image({1, 2}), 0, true), "a repeat of the same prefix parks a newer pinned copy");
+        check(cache.size() == 3, "a repeat parks again; an equal-length tie prefers the newest");
+        check(cache.has({1, 2}, {}, true), "has() finds the pinned root");
+        check(!cache.has({1, 2}, {}, false), "has() respects the steering mode");
+    }
+    {
+        ConversationCache cache(one * 3, 8);
+        check(cache.put(image({1, 2}), 0, true), "the root parks pinned");
+        check(cache.put(image({5, 6, 7})), "a first chat parks");
+        check(cache.put(image({9, 9, 9, 9})), "a second chat parks and forces an eviction");
+        check(cache.best(std::vector<int64_t>{1, 2, 9}, {}, true).tokens == 2, "the pinned root survives the eviction");
+        check(cache.best(std::vector<int64_t>{5, 6, 7, 8}, {}, true).tokens == 0, "the unpinned chat was evicted first");
+        check(cache.best(std::vector<int64_t>{9, 9, 9, 9, 1}, {}, true).tokens == 4, "the newest chat still parks");
+        check(cache.evictions() == 1, "one eviction, and it was the unpinned conversation");
+    }
+    {
+        ConversationCache cache(one * 6, 8);
+        check(cache.put(image_with_checkpoint({1, 2, 3}, {1, 2})), "a conversation with a {1,2} checkpoint parks");
+        check(cache.put(image({1, 2}), 0, true), "the pinned {1,2} root parks");
+        const ConversationCache::Match m = cache.best(std::vector<int64_t>{1, 2, 9}, {}, true);
+        check(m.tokens == 2 && cache.take(m.index).live.ids == std::vector<int32_t>({1, 2}),
+              "an equal-length tie prefers the smaller pinned root over the containing conversation");
+    }
+    {
+        ConversationCache cache(one * 4, 2);
+        check(cache.put(image({1, 2}), 0, true), "the pinned root parks");
+        check(cache.put(image({1, 3434, 3434, 55})), "an unpinned chat parks");
+        check(cache.put(image({7, 7, 7})), "a third image against a slot cap evicts the chat, not the root");
+        check(cache.best(std::vector<int64_t>{1, 2, 9}, {}, true).tokens == 2, "the pinned root outlives the slot cap");
+    }
+}
 }
 
 int main() {
+    test_root_priority();
     {
         ConversationBuffer bytes;
         const size_t first = ConversationBuffer::segment_bytes + 17;

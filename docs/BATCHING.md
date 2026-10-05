@@ -216,6 +216,10 @@ The V100 fork also retains the optional disk tier (`--conversation-cache-disk` a
 `--conversation-cache-disk-gib`). Solo and batch admissions can restore a matching disk record.
 The disk store saves the outgoing main session during admission; replacing a held batch slot does
 not itself save that slot to disk. Do not assume that every evicted slot has an L3 record.
+The system-prompt root of an admission is captured into the RAM and disk tiers independently of
+the slot state: a new chat reuses its shared system prompt even when the slot that held it was
+replaced. The root is evicted only after the conversation records (see
+`--conversation-cache-keep-root` and `--conversation-cache-disk-keep-root` in DETAILS.md).
 
 ## Testing
 
