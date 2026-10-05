@@ -364,6 +364,23 @@ void test_rewind() {
     check(store.append(name, std::move(d24), error) == ConversationDiskStatus::ok, "the second append");
 
     uint64_t cover = 0;
+    const uint64_t original_bytes = store.bytes();
+    check(store.rewind_chain(name, 8, cover, error) == ConversationDiskStatus::miss && cover == 0,
+          "a rewind below the seed requests a new record");
+    check(store.cover(name, cover) && cover == 32 && store.bytes() == original_bytes,
+          "a rewind below the seed preserves the original chain");
+    ConversationDiskRecord preserved;
+    check(store.get(name, preserved, error) == ConversationDiskStatus::ok,
+          "the original conversation remains loadable after a below-seed rewind");
+    if (!preserved.stages.empty()) {
+        check(preserved.stages[0].live.ids ==
+                  std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 32),
+              "the preserved conversation retains its full token history");
+        std::vector<uint8_t> key_bytes(preserved.stages[0].kv.front().k.size());
+        check(preserved.stages[0].kv.front().k.read(key_bytes.data(), 0, key_bytes.size()) &&
+                  key_bytes == std::vector<uint8_t>((size_t) (aligned(32, 8) * 4), 77),
+              "the preserved conversation retains its original K/V payload");
+    }
     check(store.rewind_chain(name, 15, cover, error) == ConversationDiskStatus::ok && cover == 12,
           "a rewind to 15 truncates at the last panel end <= 15 (12)");
     check(store.cover(name, cover) && cover == 12, "the chain covers 12 after the rewind");
@@ -485,6 +502,7 @@ void test_two_stages() {
               ConversationDiskStatus::ok,
           "a fresh store opens");
     // A layer split: two stages with separate carves and run-states.
+    std::vector<ConversationCheckpoint> expected[2];
     auto make2 = [&](size_t upto, int64_t first, uint8_t fill) {
         ConversationDiskRecord rec;
         SavedConversation full0 = full_image(upto, fill);
@@ -495,18 +513,101 @@ void test_two_stages() {
         full1.layer_hi = 40;
         rec.stages.push_back(make_delta_stage(full0, first, 4));
         rec.stages.push_back(make_delta_stage(full1, first, 4));
+        for (size_t si = 0; si < rec.stages.size(); ++si)
+            for (size_t position : {(size_t) first + 4, upto - 2}) {
+                ConversationCheckpoint checkpoint =
+                    full_image(position, static_cast<uint8_t>(fill + si * 10 + position)).live;
+                checkpoint.used = position;
+                expected[si].push_back(checkpoint);
+                rec.stages[si].checkpoints.push_back(std::move(checkpoint));
+            }
         return rec;
     };
     const std::string name = conversation_disk_name(std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 24), {}, true);
     check(store.seed(name, make2(12, 0, 60), "", 0, error) == ConversationDiskStatus::ok,
           "a two-stage seed parks");
     check(store.append(name, make2(24, 12, 61), error) == ConversationDiskStatus::ok, "a two-stage append parks");
+    check(store.append(name, make2(32, 24, 62), error) == ConversationDiskStatus::ok,
+          "a third two-stage panel parks");
     ConversationDiskRecord back;
     check(store.get(name, back, error) == ConversationDiskStatus::ok, "a two-stage chain reads back");
     check(back.stages.size() == 2, "both stages merge");
     check(back.stages[0].live.ids == back.stages[1].live.ids, "the stages share the token chain");
-    check(back.stages[0].live.ids.size() == 24, "each stage has the full ids");
+    check(back.stages[0].live.ids.size() == 32, "each stage has the full ids");
+    for (size_t si = 0; si < back.stages.size(); ++si) {
+        check(back.stages[si].checkpoints.size() == expected[si].size(),
+              "all panels contribute their checkpoints");
+        for (size_t j = 0; j < std::min(back.stages[si].checkpoints.size(), expected[si].size()); ++j)
+            check(back.stages[si].checkpoints[j].ids == expected[si][j].ids &&
+                      same_checkpoint(back.stages[si].checkpoints[j], expected[si][j]),
+                  "each panel checkpoint retains its own token prefix and running-state payload");
+    }
     store.remove(name, error);
+    std::filesystem::remove_all(dir);
+}
+
+void test_delta_checkpoint_below_base() {
+    // The store rejects any delta whose checkpoint list includes a position at or under the park's
+    // base: such a checkpoint is already inside the chain (or the base 'p' chain).  generate.cpp
+    // used to send the whole session checkpoint list, so a root-backed chat that kept an early
+    // checkpoint under the root base failed every park - and re-captured the whole K/V slice on
+    // every request.  park_disk now filters these out; this test pins the store side of the
+    // contract so a regression there fails fast.
+    std::filesystem::path dir = scratch_dir("ckptbase");
+    ConversationDiskStore store;
+    std::string error;
+    check(store.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok,
+          "a fresh store opens");
+
+    // The shared system prompt: a self-contained 'p' chain at 8 tokens.
+    const std::string pname = conversation_disk_prefix_name(
+        std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 8), {}, true);
+    ConversationDiskRecord root_rec;
+    root_rec.stages.push_back(make_delta_stage(full_image(8), 0, 4));
+    check(store.seed(pname, std::move(root_rec), "", 0, error) == ConversationDiskStatus::ok, "the root parks");
+
+    // A chat that seeds on the root base at 8 but carries a checkpoint at 4 (inside the base).
+    const std::string cname = conversation_disk_name(
+        std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 20), {}, true);
+    ConversationDiskRecord bad_seed;
+    bad_seed.stages.push_back(make_delta_stage(full_image(20), 8, 4));
+    ConversationCheckpoint ck0;
+    ck0.ids.assign(all_ids().begin(), all_ids().begin() + 4);
+    bad_seed.stages[0].checkpoints.push_back(std::move(ck0));
+    check(store.seed(cname, std::move(bad_seed), pname, 8, error) == ConversationDiskStatus::invalid &&
+              error.find("an invalid checkpoint in the delta") != std::string::npos,
+          "a seed with a checkpoint under the base is rejected");
+
+    // An append whose delta carries the chain's own coverage checkpoint (at 20) is rejected too.
+    const std::string cname2 = conversation_disk_name(
+        std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 28), {}, true);
+    ConversationDiskRecord good_seed;
+    good_seed.stages.push_back(make_delta_stage(full_image(20), 8, 4));
+    check(store.seed(cname2, std::move(good_seed), pname, 8, error) == ConversationDiskStatus::ok,
+          "a clean chat seeds on the root base");
+    ConversationDiskRecord bad_append;
+    bad_append.stages.push_back(make_delta_stage(full_image(28), 20, 4));
+    ConversationCheckpoint ck1;
+    ck1.ids.assign(all_ids().begin(), all_ids().begin() + 20);
+    bad_append.stages[0].checkpoints.push_back(std::move(ck1));
+    check(store.append(cname2, std::move(bad_append), error) == ConversationDiskStatus::invalid &&
+              error.find("an invalid checkpoint in the delta") != std::string::npos,
+          "an append with an already-merged checkpoint is rejected");
+
+    // The rejected deltas never touched the stored chain.
+    ConversationDiskRecord back;
+    check(store.get(cname2, back, error) == ConversationDiskStatus::ok, "the clean chain still reads back");
+    check(back.stages[0].live.ids.size() == 20, "the clean chain has the full ids");
+
+    // The same checkpoint correctly placed ABOVE the base parks.
+    ConversationDiskRecord good_append;
+    good_append.stages.push_back(make_delta_stage(full_image(28), 20, 4));
+    ConversationCheckpoint ck2;
+    ck2.ids.assign(all_ids().begin(), all_ids().begin() + 24);
+    good_append.stages[0].checkpoints.push_back(std::move(ck2));
+    check(store.append(cname2, std::move(good_append), error) == ConversationDiskStatus::ok,
+          "an append with a checkpoint above the base parks");
     std::filesystem::remove_all(dir);
 }
 
@@ -520,6 +621,7 @@ int main() {
     test_eviction_order();
     test_reopen_and_purge();
     test_two_stages();
+    test_delta_checkpoint_below_base();
     std::fprintf(stderr, "conversation_disk_test: %d checks passed\n", checks);
     return 0;
 }

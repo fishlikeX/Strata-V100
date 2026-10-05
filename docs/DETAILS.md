@@ -1139,6 +1139,32 @@ payload checksum on the next read and truncated back to the last complete panel,
 conversation survives to its previous park.  A park with nothing new since the last panel writes
 nothing.
 
+A park includes only checkpoints after the stored base. The engine excludes checkpoints at or
+before that base before it captures a delta. The disk store rejects a delta that includes these
+older checkpoints. This filter prevents repeated failed saves when a conversation has an early
+checkpoint before its shared system-prompt base.
+
+The engine checks the live GPU prefix before it selects a saved conversation. A disk record must
+provide a longer compatible prefix than the selected resident state before the engine reads it.
+A continuation that uses the live prefix or one of its own compatible checkpoints does not park
+the outgoing conversation. The K/V cells stay on the GPU. A conflicting request can cause a park
+before it replaces that state. A system-prompt record can also be saved for reuse by other chats.
+L2 can remain disabled while L3 is enabled.
+
+During decode, the engine keeps a checkpoint of the state before the latest decode window on each
+owning GPU. At response end, it copies this state to one host checkpoint. This checkpoint contains
+the recurrent state, PLE history, and indexer state; it does not contain a copy of the K/V cells.
+If the next prompt differs near the end of the reply, the engine can resume before that final
+window instead of before the entire reply. A mismatch earlier in the history still needs an
+earlier compatible checkpoint. The engine limits speculative commits at an end-of-sequence token
+or the requested output limit, so the saved live history does not include tokens past that limit.
+
+No conversation-cache transfer is required for a compatible live continuation. This does not mean
+that the drive is idle: the model's PLE table has a separate disk-read path. In a prompt log,
+"read" counts tokens processed, not bytes read from the conversation cache. Conversation-disk
+read and restore messages identify L3 loads. A conversation switch can still take seconds to load
+a large record.
+
 The delta's size grows with the new context, the KV format, the number of split stages, and the
 model's fixed running state (e.g. the SSM/gdn recurrence), not with the whole conversation, so
 frequent switching no longer flattens the drive a full record at a time.  One chain file per
@@ -1147,9 +1173,16 @@ copies of one.  On a flash device this still consumes endurance in proportion to
 write.  Use a directory on a device that you can write to, and stop the server before you delete
 the directory to clear the cache; the engine rebuilds an empty index at the next start.
 
-A chain's name comes from the token prefix at its seed.  A re-seed at the same name replaces the
-chain; a rewind truncates it to the deepest complete panel and continues from there.  Chains no
-request uses stay until eviction.
+The engine tracks the stored prefix that remains unchanged in the live session. After a checkpoint
+restore, a later park rewinds the disk chain to a complete panel within that unchanged prefix,
+then saves the replacement tail. It does this even if the new tail is longer than the old one.
+If no complete panel can be retained, the store leaves the old record intact and the engine saves
+the shorter branch as a separate record. It does not create a record with only a header.
+
+A chain's name comes from the token prefix at its seed. A new seed at the same name replaces the
+chain. During a load, each panel's checkpoint payload is restored to that panel's own checkpoint
+positions in every stage. This prevents a later panel from overwriting an earlier checkpoint.
+Unused chains remain until eviction.
 
 Size the budget for the number of conversations that you want to keep across restarts, not for
 one conversation's repeated full snapshots.  A 25 GiB budget is an example: it holds a few large

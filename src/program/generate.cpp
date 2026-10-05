@@ -1126,6 +1126,81 @@ bool checkpoint_restore(const ConvCheckpoint& c, strata::core::SessionState& ss,
     return false;
 }
 
+// Keep the pre-window running state on its owning GPU. Only the last window's
+// state is copied to a host checkpoint, once at the end of the response. K/V
+// cells are not copied: the live session still owns the matching prefix.
+struct DecodeCheckpoint {
+    struct Copy { void* dst; const void* src; size_t bytes; };
+    int device = -1;
+    void* arena = nullptr;
+    cudaStream_t stream = nullptr;
+    strata::core::SessionState view;
+    std::vector<strata::core::QsaState> qsa;
+    std::vector<Copy> copies;
+
+    ~DecodeCheckpoint() {
+        if (device < 0) return;
+        const strata::core::OnDevice on(device);
+        if (stream) cudaStreamDestroy(stream);
+        if (arena) cudaFree(arena);
+    }
+
+    bool init(const strata::core::SessionState& ss, const strata::core::ModelGeometry& g,
+              std::string& error) {
+        cudaGetDevice(&device);
+        const ConvStateSizes z = conv_state_sizes(g, ss);
+        const size_t layers = (size_t) ss.qsa_alloc;
+        const size_t bytes = z.gdn + (ss.ple_hist ? z.ple : 0) +
+                             layers * (z.tail + z.dead + z.block_pos);
+        cudaError_t status = cudaMalloc(&arena, bytes);
+        if (status == cudaSuccess) status = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+        if (status != cudaSuccess) {
+            error = std::string("allocating response-end running state: ") + cudaGetErrorString(status);
+            return false;
+        }
+        view.max_cells = ss.max_cells;
+        view.gdn_alloc = ss.gdn_alloc;
+        view.gdn_ord0 = ss.gdn_ord0;
+        view.qsa_alloc = ss.qsa_alloc;
+        view.qsa_ord0 = ss.qsa_ord0;
+        qsa.resize((size_t) (ss.qsa_ord0 + ss.qsa_alloc));
+        view.qsa_states = qsa.data();
+        size_t offset = 0;
+        auto reserve = [&](const void* src, size_t n) -> void* {
+            if (!n) return nullptr;
+            void* dst = static_cast<uint8_t*>(arena) + offset;
+            copies.push_back({dst, src, n});
+            offset += n;
+            return dst;
+        };
+        view.gdn_state = static_cast<float*>(reserve(ss.gdn_state, z.gdn));
+        view.ple_hist = static_cast<float*>(reserve(ss.ple_hist, ss.ple_hist ? z.ple : 0));
+        for (size_t j = 0; j < layers; ++j) {
+            const size_t qi = (size_t) ss.qsa_ord0 + j;
+            qsa[qi] = ss.qsa_states[qi];
+            qsa[qi].idx_tail = static_cast<float*>(reserve(ss.qsa_states[qi].idx_tail, z.tail));
+            qsa[qi].idx_dead = static_cast<float*>(reserve(ss.qsa_states[qi].idx_dead, z.dead));
+            qsa[qi].idx_block_pos = static_cast<int32_t*>(reserve(ss.qsa_states[qi].idx_block_pos, z.block_pos));
+        }
+        return true;
+    }
+
+    bool capture(std::string& error) {
+        const strata::core::OnDevice on(device);
+        for (const Copy& c : copies) {
+            const cudaError_t status = cudaMemcpyAsync(c.dst, c.src, c.bytes, cudaMemcpyDeviceToDevice, stream);
+            if (status != cudaSuccess) {
+                error = std::string("capturing response-end running state: ") + cudaGetErrorString(status);
+                return false;
+            }
+        }
+        const cudaError_t status = cudaStreamSynchronize(stream);
+        if (status == cudaSuccess) return true;
+        error = std::string("waiting for response-end running state: ") + cudaGetErrorString(status);
+        return false;
+    }
+};
+
 /// The L3 disk store's compatibility key: two runs share a store only when every input that changes the payload
 /// layout matches.  It covers the engine/schema, the model and MTP sources, the resolved geometry, the KV format
 /// and rotation, the context, the rope configuration, the per-stage layer carve and devices, and the
@@ -5679,7 +5754,7 @@ int main(int argc, char** argv) {
         };
         std::optional<std::future<DiskWriteResult>> pending_disk_write;
         // The L3 disk chain of the MAIN live session: `main_chain` is the store's chain key (stable
-        // from the seed) and `main_cover` its token coverage.  Batch slots carry their own.
+        // from the seed) and `main_cover` the stored prefix still unchanged in the live session.
         std::string main_chain;
         uint64_t main_cover = 0;
         auto finish_disk_write = [&]() {
@@ -5722,12 +5797,14 @@ int main(int argc, char** argv) {
             std::string name = main_chain;
             std::string base_name;
             uint64_t cover = main_cover, base_tokens = 0;
+            uint64_t unchanged = main_cover;
             if (!name.empty() && !disk.cover(name, cover)) name.clear();   // the chain was evicted
             if (name.empty()) {
                 strata::core::ConversationDiskMatch m;
                 if (disk.best(live, live_imgs, cvec_cached, m) && m.tokens > 0 && !m.name.empty()) {
                     if (m.name[0] == 'c') {
                         name = m.name;
+                        unchanged = (uint64_t) m.tokens;
                         if (!disk.cover(name, cover)) name.clear();   // evicted between best and park
                     } else if (m.name[0] == 'p') {
                         base_name = m.name;
@@ -5738,12 +5815,16 @@ int main(int argc, char** argv) {
             if (name.empty())
                 cover = base_tokens;   // a fresh seed: capture [seed base .. upto), never a stale cover
             if (!name.empty()) {
-                if (upto < cover) {
-                    // A rewind (the client edited the history): truncate the chain to the deepest
-                    // held panel, then re-capture the tail from the live session.
+                const uint64_t rewind_at = std::min<uint64_t>((uint64_t) upto, unchanged);
+                if (rewind_at < cover) {
+                    // A checkpoint restore can rewrite the stored tail even
+                    // when the new conversation is longer than the old record.
                     std::string rerr;
-                    if (disk.rewind_chain(name, (uint64_t) upto, cover, rerr) !=
-                        strata::core::ConversationDiskStatus::ok) {
+                    const auto status = disk.rewind_chain(name, rewind_at, cover, rerr);
+                    if (status == strata::core::ConversationDiskStatus::miss) {
+                        name.clear();
+                        cover = 0;   // no retained panel: seed a self-contained branch
+                    } else if (status != strata::core::ConversationDiskStatus::ok) {
                         std::fprintf(stderr, "strata serve: conversation disk: skip parking (%s)\n", rerr.c_str());
                         main_chain.clear();
                         main_cover = 0;
@@ -5760,8 +5841,14 @@ int main(int argc, char** argv) {
             // ---- Split the checkpoints into per-stage parts (unchanged from the full-image park).
             std::vector<std::vector<ConvCheckpoint>> stage_checks(disk_stage_count);
             for (auto& v : stage_checks) v.reserve(checks.size());
+            // The delta carries only NEW checkpoints: positions strictly after the park's base (the
+            // seed base or the last panel's end).  The store rejects any checkpoint at or under the
+            // base ("an invalid checkpoint in the delta"), and a rejected park re-captures the whole
+            // [base, upto) K/V on every request - the observed steady-state TTFT spike on chats that
+            // share the 'p' root chain and keep an early checkpoint under it.
             for (const ConvCheckpoint& c : checks) {
-                if (c.ids.size() > live.size()) return;
+                if (c.ids.size() <= (int64_t) cover) continue;      // already merged or in the base chain
+                if (c.ids.size() > live.size()) return;             // an incomplete part set
                 if (!stages.empty() && c.stage_parts.size() != stages.size()) return;   // an incomplete part set
                 for (size_t i = 0; i < disk_stage_count; ++i) {
                     ConvCheckpoint part;
@@ -5986,6 +6073,10 @@ int main(int argc, char** argv) {
         std::mutex part_mu;
         std::map<int64_t, std::vector<ConvCheckpoint>> part_at;   // position -> one part per stage
         std::vector<int64_t> part_next(stages.size() + 1, INT64_MAX);
+        std::vector<std::unique_ptr<DecodeCheckpoint>> decode_checkpoints;
+        if (o.prompt_cache > 0)
+            for (size_t i = 0; i <= stages.size(); ++i)
+                decode_checkpoints.push_back(std::make_unique<DecodeCheckpoint>());
         // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed.  `parts`: the stages'
         // states saved at L (a split's mid-prompt checkpoint); without, they are read now (everything is at L)
         // #613: why the last checkpoint_at failed - a failed device sync is the GPU itself (a hang Windows then resets),
@@ -5998,13 +6089,15 @@ int main(int argc, char** argv) {
                        ") - a GPU hang; on Windows the driver is then reset";
             return false;
         };
-        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr) -> bool {
+        auto checkpoint_at = [&](int64_t L, std::vector<ConvCheckpoint>* parts = nullptr,
+                                 const std::vector<int32_t>* tokens = nullptr) -> bool {
             ckpt_why.clear();
             if (o.prompt_cache <= 0 || L < 1) return true;
             for (ConvCheckpoint& c : checks)
                 if ((int64_t) c.ids.size() == L) { c.used = ++check_clock; return true; }
             ConvCheckpoint c;
-            c.ids.assign(cur.begin(), cur.begin() + L);
+            if (tokens) c.ids.assign(tokens->begin(), tokens->begin() + L);
+            else c.ids.assign(cur.begin(), cur.begin() + L);
             c.imgs = imgs_below(req_imgs, L);
             if (parts != nullptr) {
                 if (parts->size() != stages.size() + 1) return false;
@@ -7292,6 +7385,34 @@ int main(int argc, char** argv) {
                         from_live = false;
                     }
             }
+            if (std::getenv("STRATA_TRACE_RESUME") != nullptr) {
+                std::string why = "from_live";
+                if (!(o.prompt_cache > 0 || disk_enabled) || want_cvec != cvec_cached) {
+                    why = "gate";
+                } else if (!live_ok) {
+                    why = "live_ok=0";
+                } else {
+                    const int64_t L = (int64_t) live.size();
+                    int64_t mm = -1;
+                    const int64_t lim = (std::min)(L, n - 1);
+                    for (int64_t i = 0; i < lim; ++i)
+                        if ((int32_t) ids[(size_t) i] != live[(size_t) i]) { mm = i; break; }
+                    if (mm >= 0) {
+                        why = "ids@" + std::to_string(mm);
+                    } else if (L >= n) {
+                        why = "live_past_prompt";
+                    } else if (imgs_below(req_imgs, L) != live_imgs) {
+                        why = "imgs";
+                    }
+                }
+                std::fprintf(stderr,
+                             "strata serve: resume n=%lld resume=%lld from_live=%d live=%lld live_ok=%d "
+                             "checks=%zu top=%lld %s req_imgs=%zu live_imgs=%zu\n",
+                             (long long) n, (long long) resume, (int) from_live, (long long) live.size(),
+                             (int) live_ok, checks.size(),
+                             checks.empty() ? -1 : (long long) checks.back().ids.size(), why.c_str(),
+                             req_imgs.size(), live_imgs.size());
+            }
             // --batch: an idle slot that holds the start of this prompt (the conversation it served last) is a
             // source too - its sessions are copied back below, so only the new part is read
             int slot_source = -1;
@@ -7428,9 +7549,23 @@ int main(int argc, char** argv) {
             }
             // Preserve the outgoing branch before any checkpoint rewind, reset,
             // or incoming restore overwrites the positional state it requires.
-            if ((!from_live || incoming || disk_chosen || slot_source >= 0) && !park_current(incoming ? incoming->bytes() : 0)) {
-                std::printf("ERR %s\n", err.c_str());
-                return 1;
+            // Park only when the incoming request needs the GPU KV the outgoing session holds:
+            // a different conversation restoring in (RAM/disk/slot), a fresh chat (resume == 0)
+            // after a re-read from token 0, or an unknown live state (a cancelled request).  A
+            // same-conversation continuation - the inbound prompt resumes at one of OUR OWN
+            // checkpoints, inside the chain the live session already holds in GPU memory -
+            // rewrites the same cells; parking it would append a diverged tail panel to disk for
+            // every request of one flow, panels the client's next render never matches.  L2/L3
+            // preserve the GPU KV for a CONFLICTING request; they do not archive every
+            // intermediate state of the running conversation.
+            const bool inbound_inside_live =
+                live_ok && resume > 0 && (int64_t) live.size() > resume &&
+                std::equal(ids.begin(), ids.begin() + (size_t) resume, live.begin());
+            if ((!from_live && !inbound_inside_live) || incoming || disk_chosen || slot_source >= 0) {
+                if (!park_current(incoming ? incoming->bytes() : 0)) {
+                    std::printf("ERR %s\n", err.c_str());
+                    return 1;
+                }
             }
             // A longer disk record (disk_chosen: it beat the slot's giveback) restores over the main session in
             // the `if (disk_chosen)` block below, so the giveback copy would be thrown away - skip it, and the
@@ -7581,7 +7716,7 @@ int main(int argc, char** argv) {
                 resume = dmatch.tokens;
                 from_live = dmatch.tokens == (int64_t) live.size();
                 main_chain.clear();
-                main_cover = 0;
+                main_cover = (uint64_t) dmatch.tokens;
                 if (!dmatch.name.empty() && dmatch.name[0] == 'c')
                     main_chain = dmatch.name;   // the coverage is re-read from the store at the next park
                 std::fprintf(stderr, "strata serve: conversation disk: restored %lld tokens (%s) in %.1f ms; "
@@ -7602,9 +7737,15 @@ int main(int argc, char** argv) {
             checks.erase(std::remove_if(checks.begin(), checks.end(), [&](const ConvCheckpoint& c) {
                              return (int64_t) c.ids.size() > resume || !starts_with(c.ids, c.imgs);
                          }), checks.end());
+            if (!from_live && !main_chain.empty())
+                main_cover = std::min(main_cover, (uint64_t) resume);
             live_ok = false;   // until this request has finished, the session is in between
             int64_t reread_to = -1;   // STRATA_CKPT_REREAD only: read [0, reread_to) again instead of restoring
             if (resume == 0) {
+                // The outgoing chain was parked above. The new GPU session
+                // must not inherit its disk-chain identity or rewind its file.
+                main_chain.clear();
+                main_cover = 0;
                 strata::core::session_zero(ss, g, nullptr, main_cs);
                 cudaStreamSynchronize(main_stream);
                 for (auto& st : stages) {
@@ -8155,6 +8296,7 @@ int main(int argc, char** argv) {
             const uint64_t file_bytes0 = src.file_read_bytes();
             const int64_t decode_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             const int64_t offload0 = drive.d.offload_entries;   // #588
+            int64_t decode_checkpoint_at = -1;
             if (cancelled) finish = "cancel";
             while (!cancelled && produced_n < max_new) {
                 int T = S_mtp;
@@ -8198,6 +8340,22 @@ int main(int argc, char** argv) {
                     cudaMemcpy(d_hist, hist_stage.data(), (size_t) T * (size_t) hist_n * sizeof(int32_t),
                                cudaMemcpyHostToDevice);
                 }
+                if (!decode_checkpoints.empty()) {
+                    if (!ver.wait_commit(err)) {
+                        std::printf("ERR %s\n", err.c_str());
+                        return 1;
+                    }
+                    for (size_t i = 0; i < decode_checkpoints.size(); ++i) {
+                        const strata::core::OnDevice on(stage_device(i));
+                        DecodeCheckpoint& checkpoint = *decode_checkpoints[i];
+                        if ((checkpoint.device < 0 && !checkpoint.init(stage_session(i), g, err)) ||
+                            !checkpoint.capture(err)) {
+                            std::printf("ERR %s\n", err.c_str());
+                            return 1;
+                        }
+                    }
+                    decode_checkpoint_at = (int64_t) consumed.size();
+                }
                 tr("window", p, T);
                 const Clock::time_point tw0 = Clock::now();
                 if (!ver.run(T, window.data(), p, win_pool_fn, win_pool_user, outv.data(), err) || drive.d.failed) {
@@ -8206,6 +8364,14 @@ int main(int argc, char** argv) {
                 }
                 int a = 0;
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
+                // Do not retain speculative inputs beyond the output that ends
+                // the response. The next prompt cannot contain those inputs.
+                a = std::min(a, (int) std::min<int64_t>(max_new - produced_n - 1, T - 1));
+                for (int i = 0; i <= a; ++i)
+                    if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end()) {
+                        a = i;
+                        break;
+                    }
                 if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
                 const Clock::time_point tw1 = Clock::now();
                 std::thread adapt_thr;   // the adaptive tier beside the commit and the draft (as in generate)
@@ -8267,6 +8433,24 @@ int main(int argc, char** argv) {
             if (!ver.wait_commit(err)) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
+            }
+            if (decode_checkpoint_at > 0) {
+                std::vector<ConvCheckpoint> parts(decode_checkpoints.size());
+                for (size_t i = 0; i < parts.size(); ++i) {
+                    const strata::core::OnDevice on(stage_device(i));
+                    parts[i].ids.assign(consumed.begin(), consumed.begin() + decode_checkpoint_at);
+                    if (!checkpoint_save(parts[i], decode_checkpoints[i]->view, g)) {
+                        std::printf("ERR saving response-end checkpoint failed\n");
+                        return 1;
+                    }
+                }
+                if (!checkpoint_at(decode_checkpoint_at, &parts, &consumed)) {
+                    std::printf("ERR retaining response-end checkpoint failed%s\n", ckpt_why.c_str());
+                    return 1;
+                }
+                std::fprintf(stderr, "strata serve: response-end checkpoint %lld tokens; live tail %lld tokens\n",
+                             (long long) decode_checkpoint_at,
+                             (long long) ((int64_t) consumed.size() - decode_checkpoint_at));
             }
             if (dec_timing && dec_windows > 0) {
                 const DecSnap d1 = dec_snap();

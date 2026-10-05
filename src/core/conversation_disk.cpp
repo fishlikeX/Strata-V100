@@ -1263,6 +1263,12 @@ ConversationDiskStatus ConversationDiskStore::rewind_chain(const std::string& na
         new_cover = kept_end;
         return ConversationDiskStatus::ok;
     }
+    if (kept == 0) {
+        // A header without a panel is not a valid record. Leave the old chain
+        // intact and let the caller seed the shorter branch as a new record.
+        new_cover = 0;
+        return ConversationDiskStatus::miss;
+    }
     std::error_code ignored;
     std::filesystem::resize_file(target, pos, ignored);
     file = std::fopen(target.string().c_str(), "r+b");
@@ -1493,10 +1499,9 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
         if (base_st != nullptr)
             for (auto& c : base_st->checkpoints) st.checkpoints.push_back(std::move(c));
         cp_start[si].resize(panels.size());
-        for (size_t k = 0; k < panels.size(); ++k)
+        for (size_t k = 0; k < panels.size(); ++k) {
             cp_start[si][k] = st.checkpoints.size();
-        for (auto& panel : panels)
-            for (auto& c : panel.delta.stages[si].checkpoints) {
+            for (auto& c : panels[k].delta.stages[si].checkpoints) {
                 if (!std::equal(c.ids.begin(), c.ids.end(), st.live.ids.begin()))
                     return bad("checkpoint prefix");
                 ConversationCheckpoint out_c;
@@ -1505,6 +1510,7 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
                 out_c.used = c.used;
                 st.checkpoints.push_back(std::move(out_c));
             }
+        }
         // K/V shapes and buffer sizes: base bytes + every panel's tail lengths.
         for (size_t m = 0; m < first.kv.size(); ++m) {
             const ConversationKv& shape = first.kv[m];
