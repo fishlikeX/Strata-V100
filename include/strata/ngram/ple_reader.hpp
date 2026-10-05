@@ -11,9 +11,10 @@
 // `issue` also serves prefill: pass all 16 x N rows of a chunk; pages are deduplicated, sorted by offset and
 // kept at most `max_inflight` deep, so a chunk's reads can run while the previous chunk computes.
 //
-// THE ROW CACHE IS NOT THE TABLE. It keeps rows this process has already fetched (90 bytes each, bounded,
-// clock eviction). Measured on the frozen corpus (bench/results/2026-09-23-ngram-io): 1M rows (~95 MB)
-// would serve up to ~82% of reads; within one long prompt 20-34% of rows recur. Capacity 0 disables it.
+// THE CACHE IS NOT THE TABLE. It keeps whole 4 KiB pages that this process has already fetched. The CLI
+// budget is expressed in rows (--ple-row-cache); the reader converts the same byte budget into pages.
+// Measured on the frozen corpus (bench/results/2026-09-23-ngram-io): 1M rows (~95 MB) would serve up to
+// ~82% of reads; within one long prompt 20-34% of rows recur. Capacity 0 disables it.
 #pragma once
 
 #include "strata/platform/direct_file.hpp"
@@ -29,7 +30,7 @@ inline constexpr uint32_t PAGE = 4096;
 
 struct ReaderStats {
     uint64_t requests = 0;        ///< rows asked for
-    uint64_t cache_hits = 0;      ///< rows served from the row cache
+    uint64_t cache_hits = 0;      ///< rows served from the page cache
     uint64_t dedup_rows = 0;      ///< rows that shared a page already being read in the same ticket
     uint64_t reads = 0;           ///< SSD read requests issued
     uint64_t bytes = 0;           ///< bytes read from the SSD

@@ -400,7 +400,7 @@ bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, s
     const size_t n = n_tokens * (size_t) PLE_N_HEADS;
     if (impl_->mode == PleIo::Direct) {
         // Fast path: if all requested tokens match our in-flight/completed prefetch slots, collect them directly
-        // without issuing a second PleReader ticket or copying through RowCache.
+        // without issuing a second PleReader ticket or copying through the reader's cache.
         if (impl_->n_prefetch >= n_tokens && n_tokens <= Impl::kMaxPrefetch) {
             bool exact_match = true;
             for (size_t t = 0; t < n_tokens; ++t) {
@@ -448,7 +448,7 @@ std::string PleTable::io_report() const {
     char buf[400];
     int n = std::snprintf(buf, sizeof buf,
                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
-                  "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
+                  "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu entries",
                   (unsigned long long) s.requests, s.requests ? 100.0 * (double) s.cache_hits / (double) s.requests : 0.0,
                   (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),
                   s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
