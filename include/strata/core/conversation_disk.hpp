@@ -98,6 +98,10 @@ struct ConversationDiskOptions {
 // A safe record name from a token prefix. The store uses the same name in put().
 std::string conversation_disk_name(const std::vector<int32_t>& ids,
                                    const std::vector<ConversationImageKey>& images, bool cvec);
+// The name of a shared system-prompt prefix record: the same ids for every chat of a client, and the
+// record class ('p') the LRU evicts only after every conversation record ('c').
+std::string conversation_disk_prefix_name(const std::vector<int32_t>& ids,
+                                          const std::vector<ConversationImageKey>& images, bool cvec);
 
 class ConversationDiskStore {
 public:
@@ -122,11 +126,13 @@ public:
               bool cvec, ConversationDiskMatch& match) const;
 
     // Publishes the record. Replaces a record with the same name. Consumes the record in all cases.
-    ConversationDiskStatus put(ConversationDiskRecord&& record, std::string& error);
+    // A prefixed record (`prefix = true`) has a 'p'-class name and is evicted after conversations.
+    ConversationDiskStatus put(ConversationDiskRecord&& record, std::string& error, bool prefix = false);
 
     // Loads a record into RAM. Validates the metadata before it allocates. Verifies the payload
     // checksum while it streams. Removes the file on corruption.
     ConversationDiskStatus get(const std::string& name, ConversationDiskRecord& record, std::string& error);
+    bool has(const std::string& name) const { return find(name) != nullptr; }
 
     ConversationDiskStatus remove(const std::string& name, std::string& error);
 

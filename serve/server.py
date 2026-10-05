@@ -1638,6 +1638,15 @@ def engine_args(cfg: dict) -> list[str]:
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if len(gpu_list(cfg)) > 1 and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
+    for key, neg in (("conversation_cache_keep_root", "--no-conversation-cache-keep-root"),
+                     ("conversation_cache_disk_keep_root", "--no-conversation-cache-disk-keep-root")):
+        value = cfg.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a bool")
+        if not value and neg not in args:
+            args += [neg]
     disk_path = cfg.get("conversation_cache_disk")
     disk_gib = cfg.get("conversation_cache_disk_gib")
     if disk_path is not None or disk_gib is not None:

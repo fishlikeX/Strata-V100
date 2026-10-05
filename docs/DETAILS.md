@@ -1071,13 +1071,27 @@ Two optional flags tune the store. `--conversation-cache-disk-slots N` caps the 
 records (default 0 = no cap). `--conversation-cache-disk-min-free-mib N` keeps that many MiB
 free on the store's filesystem (default 0 = no floor). Both need the path and the GiB budget.
 
+Two more flags pin the shared system prompt. `--conversation-cache-keep-root` (default on) pins the
+system-prompt prefix image in the RAM cache. `--conversation-cache-disk-keep-root` (default on) gives the
+prefix its own 'p'-class record on disk. Their `--no-` variants turn each pin off.
+
 A request reuses a record only when its prompt starts with exactly the record's tokens and
-images, and its control-vector mode matches. The store keeps the longest matching prefix; a
-tie prefers the most recently used record. Across the live session, the RAM cache, the disk
+images, and its control-vector mode matches. The store keeps the longest matching prefix; an equal-length
+tie prefers the smaller record: the system-prompt prefix over the conversation record that contains it.
+Across the live session, the RAM cache, the disk
 tier and the idle batch slots, the longest valid prefix wins: the engine takes a disk record
 only when it strictly improves on live GPU or slot state (verified - a 25-token record
 does not displace a 152-token state, nor a 172-token record a 299-token one). No client
 session ID is needed.
+
+**The shared system prompt (captured once).** When a fresh chat's prompt is read from token 0, the engine
+checkpoints the end of the system prompt (the first turn boundary) if that is `--prompt-cache-root` tokens
+or more. Each enabled tier then captures that prefix once - when it does not hold it yet - as a
+system-prompt (root) image. The root outlives the conversations that share it: the RAM cache and the disk
+LRU evict it only after every unpinned record, and an equal-length match prefers the root because restoring
+it reads the shared prefix alone instead of the conversation record that contains it. The bytes of one
+system prompt are written once, not once per chat. Options: `--conversation-cache-keep-root` and
+`--conversation-cache-disk-keep-root` (both default on).
 
 One record holds one conversation and one image per `--layer-split` stage. A two-card run
 parks and resumes as one unit, and every stage must hold the same token and image chain. A

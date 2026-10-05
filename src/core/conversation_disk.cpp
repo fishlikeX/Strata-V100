@@ -458,8 +458,11 @@ ConversationDiskIdentity ConversationDiskIdentity::from_string(std::string_view 
     return identity;
 }
 
-std::string conversation_disk_name(const std::vector<int32_t>& ids,
-                                   const std::vector<ConversationImageKey>& images, bool cvec) {
+// One name class per purpose: 'c' for a conversation's own record, 'p' for the shared system-prompt
+// (chain root) prefix record.  The rest of the name is the FNV-1a over the token prefix (with its image
+// keys and steering mode), so the same prefix makes the same name in every conversation that shares it.
+std::string disk_name(char cls, const std::vector<int32_t>& ids,
+                      const std::vector<ConversationImageKey>& images, bool cvec) {
     uint64_t hash = conversation_disk_checksum_seed;
     const uint64_t count = ids.size();
     hash = conversation_disk_checksum(reinterpret_cast<const uint8_t*>(&count), sizeof(count), hash);
@@ -473,7 +476,17 @@ std::string conversation_disk_name(const std::vector<int32_t>& ids,
         hash = conversation_disk_checksum(reinterpret_cast<const uint8_t*>(&key.hash), sizeof(key.hash), hash);
     }
     hash = conversation_disk_checksum(reinterpret_cast<const uint8_t*>(&cvec), sizeof(cvec), hash);
-    return "c" + hex64(hash) + "-" + hex64(count);
+    return std::string(1, cls) + hex64(hash) + "-" + hex64(count);
+}
+
+std::string conversation_disk_name(const std::vector<int32_t>& ids,
+                                   const std::vector<ConversationImageKey>& images, bool cvec) {
+    return disk_name('c', ids, images, cvec);
+}
+
+std::string conversation_disk_prefix_name(const std::vector<int32_t>& ids,
+                                          const std::vector<ConversationImageKey>& images, bool cvec) {
+    return disk_name('p', ids, images, cvec);
 }
 
 bool ConversationDiskStore::valid_name(const std::string& name) {
@@ -500,16 +513,24 @@ ConversationDiskStore::Entry* ConversationDiskStore::find(const std::string& nam
 }
 
 size_t ConversationDiskStore::lru_victim(const std::string& skip) const {
-    size_t victim = SIZE_MAX;
-    uint64_t oldest = UINT64_MAX;
-    for (size_t i = 0; i < entries_.size(); ++i) {
-        if (!skip.empty() && entries_[i].name == skip) continue;
-        if (entries_[i].stamp < oldest) {
-            oldest = entries_[i].stamp;
-            victim = i;
+    // A shared system-prompt record ('p') is kept for the conversations that share it: evict an
+    // unpinned conversation record first, and only take a 'p' record when the budget must hold.
+    auto pick = [&](bool pinned) -> size_t {
+        size_t victim = SIZE_MAX;
+        uint64_t oldest = UINT64_MAX;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            if (!skip.empty() && entries_[i].name == skip) continue;
+            const bool is_pinned = !entries_[i].name.empty() && entries_[i].name[0] == 'p';
+            if (is_pinned != pinned) continue;
+            if (entries_[i].stamp < oldest) {
+                oldest = entries_[i].stamp;
+                victim = i;
+            }
         }
-    }
-    return victim;
+        return victim;
+    };
+    if (const size_t victim = pick(false); victim != SIZE_MAX) return victim;
+    return pick(true);
 }
 
 void ConversationDiskStore::evict(size_t index) {
@@ -683,8 +704,13 @@ bool ConversationDiskStore::best(const std::vector<int32_t>& ids,
         if (entry.cvec != cvec) continue;
         for (const auto& point : entry.points) {
             const int64_t tokens = conversation_prefix(point, ids, images);
-            if (tokens > chosen_tokens ||
-                (tokens == chosen_tokens && tokens > 0 && chosen != nullptr && entry.stamp > chosen->stamp)) {
+            const bool longer = tokens > chosen_tokens;
+            // An equal-length tie prefers the SMALLER record: a 24k system-prompt record reads back
+            // far less than the 80k conversation that contains the same prefix, for the same answer.
+            const bool equal_smaller = tokens == chosen_tokens && tokens > 0 && chosen != nullptr &&
+                                       (entry.bytes < chosen->bytes ||
+                                        (entry.bytes == chosen->bytes && entry.stamp > chosen->stamp));
+            if (longer || equal_smaller) {
                 chosen_tokens = tokens;
                 chosen = &entry;
             }
@@ -696,7 +722,8 @@ bool ConversationDiskStore::best(const std::vector<int32_t>& ids,
     return true;
 }
 
-ConversationDiskStatus ConversationDiskStore::put(ConversationDiskRecord&& record, std::string& error) {
+ConversationDiskStatus ConversationDiskStore::put(ConversationDiskRecord&& record, std::string& error,
+                                                  bool prefix) {
     if (!enabled()) return ConversationDiskStatus::disabled;
     if (record.stages.empty()) {
         error = "the record has no stage";
@@ -716,7 +743,8 @@ ConversationDiskStatus ConversationDiskStore::put(ConversationDiskRecord&& recor
         error = "the record has no live token prefix";
         return ConversationDiskStatus::invalid;
     }
-    const std::string name = conversation_disk_name(deepest->ids, deepest->imgs, cvec);
+    const std::string name = prefix ? conversation_disk_prefix_name(deepest->ids, deepest->imgs, cvec)
+                                    : conversation_disk_name(deepest->ids, deepest->imgs, cvec);
     if (!valid_name(name)) {
         error = "the record name is not safe";
         return ConversationDiskStatus::invalid;

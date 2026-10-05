@@ -418,6 +418,72 @@ void test_disabled_and_invalid(const std::filesystem::path& directory) {
     check(cramped.remove("..", error) == ConversationDiskStatus::invalid, "an unsafe remove is invalid");
 }
 
+
+ConversationDiskRecord make_record_with_checkpoint(std::initializer_list<int32_t> ids,
+                                                   std::initializer_list<int32_t> ck_ids,
+                                                   uint8_t fill, size_t kv_bytes) {
+    ConversationDiskRecord record = make_record(ids, fill, kv_bytes);
+    ConversationCheckpoint checkpoint;
+    checkpoint.ids = ck_ids;
+    checkpoint.gdn.assign(8, fill);
+    record.stages[0].checkpoints.push_back(std::move(checkpoint));
+    return record;
+}
+
+void test_prefix_records(const std::filesystem::path& directory) {
+    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("prefix");
+    ConversationDiskStore store;
+    std::string error;
+    // ~2.5 KiB: two of the records fit; every further record must evict one.  A 'p'-class prefix record
+    // is evicted only after every 'c' conversation record.
+    check(store.open(options_for(directory, identity, 2500), error) == ConversationDiskStatus::ok,
+          "the prefix store opens");
+    const std::string root_name = conversation_disk_prefix_name({2, 2, 2}, {}, true);
+    check(root_name[0] == 'p', "the prefix name carries the 'p' class");
+    check(root_name != conversation_disk_name({2, 2, 2}, {}, true),
+          "the prefix name differs from the conversation name of the same ids");
+    check(store.put(make_record({1, 1, 1, 1}, 0x40, 512), error) == ConversationDiskStatus::ok,
+          "the first conversation lands");
+    check(store.put(make_record({2, 2, 2}, 0x41, 128), error, true) == ConversationDiskStatus::ok,
+          "the root prefix lands pinned");
+    check(store.records() == 2 && store.has(root_name), "both records are indexed");
+    check(store.put(make_record({3, 3, 3, 3}, 0x42, 512), error) == ConversationDiskStatus::ok,
+          "a third conversation lands");
+    check(store.evictions() == 1, "exactly one eviction made room");
+    ConversationDiskMatch match;
+    check(store.best({2, 2, 2, 9}, {}, true, match), "the pinned prefix survives");
+    check(!store.best({1, 1, 1, 1, 9}, {}, true, match), "the oldest conversation was evicted first");
+    check(store.put(make_record({4, 4, 4}, 0x43, 128), error, true) == ConversationDiskStatus::ok,
+          "a second prefix lands");
+    check(store.evictions() == 2 && store.records() == 2, "a second prefix evicted the remaining conversation");
+    check(store.best({2, 2, 2, 9}, {}, true, match), "the first prefix is still there");
+    check(!store.best({3, 3, 3, 3, 9}, {}, true, match), "the second conversation is gone");
+    check(store.put(make_record({5, 5, 5, 5}, 0x44, 512), error) == ConversationDiskStatus::ok,
+          "a fourth conversation lands");
+    check(store.evictions() == 3 && !store.has(root_name),
+          "with only pinned records left, the LRU takes the oldest pinned prefix");
+    check(store.best({4, 4, 4, 9}, {}, true, match), "the surviving prefix still matches");
+    ConversationDiskRecord loaded;
+    check(store.get(match.name, loaded, error) == ConversationDiskStatus::ok, "the prefix record reads back");
+    check(loaded.stages[0].live.ids == std::vector<int32_t>({4, 4, 4}), "the prefix record holds the prefix");
+}
+
+void test_prefix_tie_break(const std::filesystem::path& directory) {
+    const ConversationDiskIdentity identity = ConversationDiskIdentity::from_string("tie");
+    ConversationDiskStore store;
+    std::string error;
+    check(store.open(options_for(directory, identity, 1ull << 20), error) == ConversationDiskStatus::ok,
+          "the tie store opens");
+    check(store.put(make_record_with_checkpoint({1, 2, 3}, {1, 2}, 0x50, 512), error) == ConversationDiskStatus::ok,
+          "a conversation containing a {1,2} checkpoint lands");
+    const std::string prefix_name = conversation_disk_prefix_name({1, 2}, {}, true);
+    check(store.put(make_record({1, 2}, 0x51, 64), error, true) == ConversationDiskStatus::ok,
+          "the {1,2} prefix record lands");
+    ConversationDiskMatch match;
+    check(store.best({1, 2, 9}, {}, true, match), "a {1,2} prompt matches both records");
+    check(match.name == prefix_name, "an equal-length tie prefers the smaller prefix record");
+    check(match.tokens == 2, "the tie keeps the prefix length");
+}
 } // namespace
 
 int main() {
@@ -433,6 +499,8 @@ int main() {
     test_multi_stage(root / "split");
     test_recovery(root / "recovery");
     test_eviction(root / "eviction");
+    test_prefix_records(root / "prefix");
+    test_prefix_tie_break(root / "tie");
     test_caps_and_limits(root / "caps");
     test_corruption(root / "corruption");
     test_disabled_and_invalid(root / "disabled");

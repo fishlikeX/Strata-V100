@@ -1055,6 +1055,23 @@ class ConversationDiskArguments(unittest.TestCase):
         ):
             with self.subTest(cfg=cfg), self.assertRaises(ValueError):
                 engine_args(cfg)
+
+    def test_keep_root_passthrough(self):
+        cfg = {
+            "args": ["--native", "model.gguf"],
+            "gpu": [0, 1],
+            "conversation_cache_keep_root": False,
+            "conversation_cache_disk_keep_root": False,
+        }
+        args = engine_args(cfg)
+        self.assertIn("--no-conversation-cache-keep-root", args)
+        self.assertIn("--no-conversation-cache-disk-keep-root", args)
+
+    def test_keep_root_defaults_do_not_add_flags(self):
+        cfg = {"args": ["--native", "model.gguf"], "gpu": [0, 1]}
+        args = engine_args(cfg)
+        self.assertNotIn("--no-conversation-cache-keep-root", args)
+        self.assertNotIn("--no-conversation-cache-disk-keep-root", args)
 class PcieShare(unittest.TestCase):
     """#588: the hit rate stays the VRAM share of the lookups; the routed experts the GPU read over PCIe (the DONE
     line's 16th field, engine 0.1.39+) are given as their own share of all routed experts."""

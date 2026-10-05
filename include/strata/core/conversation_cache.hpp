@@ -169,6 +169,12 @@ public:
     size_t bytes() const { return bytes_ + reuse_.bytes(); }
     size_t size() const { return entries_.size(); }
     size_t evictions() const { return evictions_; }
+    // A parked system-prompt prefix (the chain's root) is the same ids for every chat of a client.
+    bool has(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs, bool cvec) const {
+        for (const auto& e : entries_)
+            if (e.image.cvec == cvec && e.image.live.ids == ids && e.image.live.imgs == imgs) return true;
+        return false;
+    }
 
     // Retain only the restored K/V buffers, not duplicate running checkpoints.
     // This optimization never evicts a parked conversation to make itself fit.
@@ -195,23 +201,29 @@ public:
     template<class Token>
     Match best(const std::vector<Token>& prompt, const std::vector<ConversationImageKey>& images, bool cvec) const {
         Match best;
-        // Ties prefer the most recently parked branch. The caller prefers its
+        // An equal-length tie prefers the SMALLER image: a parked system-prompt prefix over a whole
+        // conversation that contains it reads back faster with identical output.  At equal bytes the
+        // most recently parked branch wins (the iteration direction); the caller prefers its
         // already-active state when that offers the same prefix length.
         for (size_t i = entries_.size(); i-- > 0;) {
             const auto& e = entries_[i];
-            if (e.cvec != cvec) continue;
+            if (e.image.cvec != cvec) continue;
             auto consider = [&](const ConversationCheckpoint& c, bool live) {
                 const int64_t n = conversation_prefix(c, prompt, images);
-                if (n > best.tokens) best = {i, n, live};
+                if (n == 0) return;
+                const bool longer = n > best.tokens;
+                const bool equal_smaller = n == best.tokens && n != 0 &&
+                                           e.image.bytes() < entries_[best.index].image.bytes();
+                if (longer || equal_smaller) best = {i, n, live};
             };
-            consider(e.live, true);
-            for (const auto& c : e.checkpoints) consider(c, false);
+            consider(e.image.live, true);
+            for (const auto& c : e.image.checkpoints) consider(c, false);
         }
         return best;
     }
 
     SavedConversation take(size_t index) {
-        SavedConversation out = std::move(entries_.at(index));
+        SavedConversation out = std::move(entries_.at(index).image);
         bytes_ -= out.bytes();
         entries_.erase(entries_.begin() + (std::ptrdiff_t) index);
         return out;
@@ -223,8 +235,13 @@ public:
         if (!enabled() || held > budget_ || incoming > budget_ - held) return false;
         if (bytes() > budget_ - held - incoming) reuse_ = {};
         while (!entries_.empty() && (entries_.size() >= slots_ || bytes_ > budget_ - held - incoming)) {
-            bytes_ -= entries_.front().bytes();
-            entries_.pop_front();
+            // The shared system prompt goes last: drop the oldest unpinned image first, and only
+            // evict a pinned prefix when nothing else is left (the budget must always hold).
+            size_t victim = 0;
+            for (size_t i = 0; i < entries_.size(); ++i)
+                if (!entries_[i].pinned) { victim = i; break; }
+            bytes_ -= entries_[victim].image.bytes();
+            entries_.erase(entries_.begin() + (std::ptrdiff_t) victim);
             ++evictions_;
         }
         return true;
@@ -249,10 +266,10 @@ public:
         for (size_t i = 0; i < entries_.size();) {
             const auto& e = entries_[i];
             const ConversationCheckpoint* deepest = nullptr;
-            for (const auto& c : e.checkpoints)
+            for (const auto& c : e.image.checkpoints)
                 if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
-            if (e.cvec == cvec && deepest && !deepest->ids.empty() && held(*deepest)) {
-                bytes_ -= e.bytes();
+            if (e.image.cvec == cvec && deepest && !deepest->ids.empty() && held(*deepest)) {
+                bytes_ -= e.image.bytes();
                 entries_.erase(entries_.begin() + (std::ptrdiff_t) i);
                 ++dropped;
                 continue;
@@ -264,19 +281,23 @@ public:
     }
     size_t superseded() const { return superseded_; }
 
-    bool put(SavedConversation&& image, size_t held = 0) {
+    bool put(SavedConversation&& image, size_t held = 0, bool pinned = false) {
         const size_t n = image.bytes();
         if (!enabled() || held > budget_ || n > budget_ - held) return false;   // make_room's refusal, first
         drop_superseded(image.live.ids, image.live.imgs, image.checkpoints, image.cvec);
         if (!make_room(n, held)) return false;
-        entries_.push_back(std::move(image));
+        entries_.push_back(Entry{std::move(image), pinned});
         bytes_ += n;
         return true;
     }
 
 private:
     size_t budget_ = 0, slots_ = 0, bytes_ = 0, evictions_ = 0, superseded_ = 0;
-    std::deque<SavedConversation> entries_; // least recently active first
+    struct Entry {
+        SavedConversation image;
+        bool pinned = false;   // a shared system-prompt prefix: evicted last (--conversation-cache-keep-root)
+    };
+    std::deque<Entry> entries_; // least recently active first
     ConversationKvReuse reuse_;
 };
 
