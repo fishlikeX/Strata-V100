@@ -148,9 +148,9 @@ public:
     // The token coverage of a chain (its latest panel's end), or false when it is not indexed.
     bool cover(const std::string& name, uint64_t& tokens) const;
 
-    // Rewinds a chain to at most `at` tokens: drops every panel whose end exceeds `at`.
-    // `new_cover` is the deepest kept panel's end (the caller then re-captures the delta from
-    // there, or reseeds from the chain's base).  No-op when the chain already covers `at`.
+    // Reuses a saved checkpoint at `at` as the next append's base without rewriting
+    // the existing file. Other positions retain the deepest complete panel.
+    // The pending replacement becomes persistent only after a successful append.
     ConversationDiskStatus rewind_chain(const std::string& name, uint64_t at, uint64_t& new_cover,
                                         std::string& error);
 
@@ -175,6 +175,7 @@ private:
         uint64_t bytes = 0;
         uint64_t stamp = 0;
         uint64_t cover = 0;            ///< tokens the chain covers at its last write
+        uint64_t rewrite_from = UINT64_MAX; ///< pending tail replacement; file remains intact until append
         bool cvec = true;
         bool root = false;             ///< a system-prompt ('p') chain: evicted after conversations
         size_t refs = 0;               ///< chat chains whose base this root is (roots only)

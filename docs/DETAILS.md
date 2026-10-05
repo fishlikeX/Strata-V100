@@ -1173,16 +1173,31 @@ copies of one.  On a flash device this still consumes endurance in proportion to
 write.  Use a directory on a device that you can write to, and stop the server before you delete
 the directory to clear the cache; the engine rebuilds an empty index at the next start.
 
-The engine tracks the stored prefix that remains unchanged in the live session. After a checkpoint
-restore, a later park rewinds the disk chain to a complete panel within that unchanged prefix,
-then saves the replacement tail. It does this even if the new tail is longer than the old one.
-If no complete panel can be retained, the store leaves the old record intact and the engine saves
-the shorter branch as a separate record. It does not create a record with only a header.
+The engine tracks the stored prefix that remains unchanged in the live session. If a restore
+selects a saved checkpoint inside a panel, the next park appends a replacement tail from that
+checkpoint to the same chain. It does not copy the unchanged prefix into a new full record.
+The new tail includes the overlap page, indexer rows, and current running state needed for a
+correct restore. This also permits a replacement that is shorter than the old tail.
+
+The existing file remains valid until the replacement append succeeds. During a load, later
+panels replace earlier token and image tails. The loader excludes checkpoints from discarded
+branches, limits older K/V payloads to the new buffer extent, and verifies payload checksums.
+After a restart, the index reconstructs the same replacement history from panel metadata.
+For a rewind position without a saved checkpoint, the store retains complete panels as before.
+If none can be retained, it preserves the old record and requests a separate seed.
 
 A chain's name comes from the token prefix at its seed. A new seed at the same name replaces the
 chain. During a load, each panel's checkpoint payload is restored to that panel's own checkpoint
 positions in every stage. This prevents a later panel from overwriting an earlier checkpoint.
 Unused chains remain until eviction.
+
+Older duplicate records are not removed by a background deduplication operation. The store
+evicts least-recently-used conversation records when a save needs space within the byte budget,
+record limit, or free-space limit. System-prompt records have a separate eviction priority.
+Thus old unused copies can be removed during later saves, but an idle cache does not shrink.
+The fix does not compact obsolete payloads inside an existing chain. No manual cache reset is
+required. To reclaim all cache space immediately, stop the service before clearing its cache
+directory; this discards saved conversations and makes later requests rebuild their state.
 
 Size the budget for the number of conversations that you want to keep across restarts, not for
 one conversation's repeated full snapshots.  A 25 GiB budget is an example: it holds a few large

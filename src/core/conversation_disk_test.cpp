@@ -542,6 +542,67 @@ void test_two_stages() {
                       same_checkpoint(back.stages[si].checkpoints[j], expected[si][j]),
                   "each panel checkpoint retains its own token prefix and running-state payload");
     }
+    // Reuse a checkpoint inside the first panel, including a shorter replacement
+    // whose buffers must not receive the discarded suffix of the older panels.
+    const uint64_t before = store.bytes();
+    uint64_t retained = 0;
+    check(store.rewind_chain(name, 10, retained, error) == ConversationDiskStatus::ok && retained == 10,
+          "a panel-interior checkpoint retains the exact unchanged prefix");
+    check(store.bytes() == before && store.records() == 1,
+          "preparing a tail replacement does not copy or remove the stored prefix");
+    ConversationDiskRecord replacement = make2(20, 10, 90);
+    for (auto& stage : replacement.stages) {
+        for (auto& id : stage.live.ids) id += 1000;
+        for (auto& checkpoint : stage.checkpoints)
+            for (size_t i = 10; i < checkpoint.ids.size(); ++i) checkpoint.ids[i] += 1000;
+    }
+    check(store.append(name, std::move(replacement), error) == ConversationDiskStatus::ok,
+          "a shorter changed tail appends to the original chain");
+    check(store.records() == 1 && store.bytes() > before,
+          "a replacement retains one chain rather than a full independent seed");
+    ConversationDiskStore reopened;
+    check(reopened.open(options_for(dir, ConversationDiskIdentity::from_string("test"), 1ull << 30), error) ==
+              ConversationDiskStatus::ok, "overlapping tail panels survive a restart");
+    check(reopened.get(name, back, error) == ConversationDiskStatus::ok && back.stages.size() == 2,
+          "a shorter replacement restores both stages");
+    for (size_t si = 0; si < back.stages.size(); ++si) {
+        std::vector<int32_t> ids(all_ids().begin(), all_ids().begin() + 20);
+        for (size_t i = 10; i < ids.size(); ++i) ids[i] += 1000;
+        check(back.stages[si].live.ids == ids, "the restored history contains only the replacement tail");
+        std::vector<uint8_t> actual(back.stages[si].kv[0].k.size());
+        check(back.stages[si].kv[0].k.read(actual.data(), 0, actual.size()),
+              "the replaced key buffer can be read");
+        std::vector<uint8_t> wanted(actual.size(), (uint8_t) (90 + si * 10));
+        std::fill(wanted.begin(), wanted.begin() + 8 * 4, (uint8_t) (60 + si * 10));
+        check(actual == wanted, "the original key prefix and replacement overlap page remain byte exact");
+        check(same_checkpoint(back.stages[si].live, full_image(20, (uint8_t) (90 + si * 10)).live),
+              "the merged running state comes from the replacement panel");
+        const auto& kv = back.stages[si].kv[0];
+        const ConversationBuffer* buffers[] = {&kv.v, &kv.k_scale, &kv.v_scale, &kv.pooled};
+        const size_t prefix_bytes[] = {32, 16, 16, 64};
+        for (size_t e = 0; e < 4; ++e) {
+            std::vector<uint8_t> values(buffers[e]->size());
+            std::vector<uint8_t> expected_values(values.size(), (uint8_t) (91 + si * 10 + e));
+            std::fill(expected_values.begin(), expected_values.begin() + prefix_bytes[e],
+                      (uint8_t) (61 + si * 10 + e));
+            check(buffers[e]->read(values.data(), 0, values.size()) && values == expected_values,
+                  "all value, scale and indexer buffers retain the prefix and replace the tail");
+        }
+        for (const auto& checkpoint : back.stages[si].checkpoints)
+            check(checkpoint.ids.size() <= ids.size() &&
+                      std::equal(checkpoint.ids.begin(), checkpoint.ids.end(), ids.begin()),
+                  "discarded branch checkpoints do not survive the replacement");
+    }
+    const uint64_t delta_bytes = store.bytes() - before;
+    const uint64_t stored_bytes = reopened.bytes();
+    const std::string full_name = conversation_disk_name(
+        std::vector<int32_t>(all_ids().begin(), all_ids().begin() + 20), {}, true);
+    check(reopened.seed(full_name, make2(20, 0, 90), "", 0, error) == ConversationDiskStatus::ok,
+          "a full seed provides the offload byte-size reference");
+    const uint64_t full_bytes = reopened.bytes() - stored_bytes;
+    check(delta_bytes < full_bytes, "a panel-interior replacement writes fewer bytes than a full seed");
+    std::printf("panel-interior replacement: %llu bytes appended versus %llu bytes for a full seed\n",
+                (unsigned long long) delta_bytes, (unsigned long long) full_bytes);
     store.remove(name, error);
     std::filesystem::remove_all(dir);
 }

@@ -408,7 +408,9 @@ bool read_chain_meta(std::FILE* file, const ConversationDiskIdentity& identity,
     for (uint64_t k = 0; k < header.panel_count; ++k) {
         PanelHeader p{};
         if (!read_exact(file, &p, sizeof(p))) return bad("panel header");
-        if (p.magic != kPanelMagic || p.base_tokens != expected || p.end_tokens < p.base_tokens)
+        if (p.magic != kPanelMagic || p.base_tokens > expected ||
+            p.base_tokens < (header.base_kind ? header.base_tokens : 0) ||
+            (k == 0 && p.base_tokens != expected) || p.end_tokens <= p.base_tokens)
             return bad("panel header");
         if (p.metadata_bytes > kMaxMetadataBytes || p.payload_bytes > budget_bytes)
             return bad("panel sizes");
@@ -790,6 +792,9 @@ ConversationDiskStatus ConversationDiskStore::index_file(const std::filesystem::
             if ((uint64_t) stage.live.ids.size() != panel.end_tokens - panel.base_tokens)
                 return bad("token slice");
             if (si == 0) {
+                ids.resize((size_t) panel.base_tokens);
+                all_imgs.erase(std::remove_if(all_imgs.begin(), all_imgs.end(),
+                    [&](const ConversationImageKey& image) { return image.start >= (int64_t) panel.base_tokens; }), all_imgs.end());
                 ids.insert(ids.end(), stage.live.ids.begin(), stage.live.ids.end());
                 all_imgs.insert(all_imgs.end(), stage.live.imgs.begin(), stage.live.imgs.end());
             }
@@ -810,13 +815,18 @@ ConversationDiskStatus ConversationDiskStore::index_file(const std::filesystem::
         final_point.imgs = std::move(all_imgs);
         entry.points.push_back(std::move(final_point));
     }
-    for (auto& panel : panels)
+    for (auto& panel : panels) {
+        entry.points.erase(std::remove_if(entry.points.begin() + 1, entry.points.end(),
+            [&](const ConversationCheckpoint& point) { return point.ids.size() > panel.base_tokens; }), entry.points.end());
         for (const auto& c : panel.delta.stages.front().checkpoints) {
+            if (c.ids.size() > entry.cover ||
+                !std::equal(c.ids.begin(), c.ids.end(), entry.points.front().ids.begin())) continue;
             ConversationCheckpoint point;
             point.ids = c.ids;
             point.imgs = c.imgs;
             entry.points.push_back(std::move(point));
         }
+    }
     return ConversationDiskStatus::ok;
 }
 
@@ -1073,7 +1083,7 @@ ConversationDiskStatus ConversationDiskStore::append(const std::string& name, Co
             error = "the stages disagree on the token chain";
             return ConversationDiskStatus::invalid;
         }
-    const uint64_t base = entry->cover;
+    const uint64_t base = entry->rewrite_from == UINT64_MAX ? entry->cover : entry->rewrite_from;
     const uint64_t end = base + slice;
     if (end < base) {
         error = "the record size overflows";
@@ -1084,12 +1094,16 @@ ConversationDiskStatus ConversationDiskStore::append(const std::string& name, Co
     std::vector<ConversationCheckpoint> points;
     {
         std::vector<int32_t> full = entry->points.front().ids;
+        full.resize((size_t) base);
         full.insert(full.end(), record.stages.front().live.ids.begin(), record.stages.front().live.ids.end());
         std::vector<ConversationImageKey> imgs = entry->points.front().imgs;
+        imgs.erase(std::remove_if(imgs.begin(), imgs.end(),
+            [&](const ConversationImageKey& image) { return image.start >= (int64_t) base; }), imgs.end());
         imgs.insert(imgs.end(), record.stages.front().live.imgs.begin(), record.stages.front().live.imgs.end());
         points = chain_points(full, imgs, record.stages.front(), base, end, error);
         if (points.empty()) return ConversationDiskStatus::invalid;
-        points.insert(points.begin() + 1, entry->points.begin() + 1, entry->points.end());
+        for (auto it = entry->points.begin() + 1; it != entry->points.end(); ++it)
+            if (it->ids.size() <= base) points.push_back(*it);
     }
     MetaWriter metadata;
     metadata.u32(static_cast<uint32_t>(record.stages.size()));
@@ -1107,6 +1121,8 @@ ConversationDiskStatus ConversationDiskStore::append(const std::string& name, Co
     }
     const ConversationDiskStatus room = make_room(panel_bytes, name, false, error);
     if (room != ConversationDiskStatus::ok) return room;
+    entry = find(name); // eviction can move entries in the index
+    if (entry == nullptr) return ConversationDiskStatus::miss;
     const std::filesystem::path target = path_for(name);
     // "r+b": appends must be able to seek back and patch the panel/chain headers in place (an
     // append-mode stream would force EVERY write to the end of the file).
@@ -1185,6 +1201,7 @@ ConversationDiskStatus ConversationDiskStore::append(const std::string& name, Co
     bytes_ += new_bytes - entry->bytes;
     entry->bytes = new_bytes;
     entry->cover = end;
+    entry->rewrite_from = UINT64_MAX;
     entry->points = std::move(points);
     return ConversationDiskStatus::ok;
 }
@@ -1221,6 +1238,15 @@ ConversationDiskStatus ConversationDiskStore::rewind_chain(const std::string& na
                                                            uint64_t& new_cover, std::string& error) {
     Entry* entry = find(name);
     if (entry == nullptr) return ConversationDiskStatus::miss;
+    // Keep the existing payload intact and replace only the tail on the next
+    // append when `at` is a saved checkpoint inside a panel. A failed append
+    // leaves the previous valid record available.
+    if (at < entry->cover && std::any_of(entry->points.begin() + 1, entry->points.end(),
+            [&](const ConversationCheckpoint& point) { return point.ids.size() == at; })) {
+        entry->rewrite_from = at;
+        new_cover = at;
+        return ConversationDiskStatus::ok;
+    }
     if (at >= entry->cover) {
         new_cover = entry->cover;
         return ConversationDiskStatus::ok;
@@ -1245,7 +1271,7 @@ ConversationDiskStatus ConversationDiskStore::rewind_chain(const std::string& na
         PanelHeader p{};
         if (std::fseek(file, static_cast<long>(pos), SEEK_SET) != 0 ||
             !read_exact(file, &p, sizeof(p)) || p.magic != kPanelMagic ||
-            p.base_tokens != kept_end) {
+            p.base_tokens > kept_end) {
             ok = false;
             break;
         }
@@ -1366,7 +1392,7 @@ bool ConversationDiskStore::truncate_torn_tail(const std::string& name) {
         PanelHeader p{};
         if (std::fseek(file, static_cast<long>(pos), SEEK_SET) != 0 ||
             !read_exact(file, &p, sizeof(p)) || p.magic != kPanelMagic ||
-            p.base_tokens != kept_end) {
+            p.base_tokens > kept_end) {
             ok = false;
             break;
         }
@@ -1468,6 +1494,9 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
     out.stages.resize(stage_count);
     std::vector<std::vector<size_t>> cp_start(stage_count);   // per panel, per stage: checkpoint index
     std::vector<std::vector<std::array<size_t, 5>>> c_per(stage_count);   // bytes per unit, per stage/layer
+    std::vector<uint64_t> checkpoint_limits(panels.size(), header.total_tokens);
+    for (size_t k = panels.size() - 1; k > 0; --k)
+        checkpoint_limits[k - 1] = std::min(checkpoint_limits[k], panels[k].base_tokens);
     for (size_t si = 0; si < stage_count; ++si) {
         SavedConversation& st = out.stages[si];
         const SavedConversation* base_st = base.stages.empty() ? nullptr : &base.stages[si];
@@ -1488,6 +1517,9 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
             const SavedConversation& stage = panel.delta.stages[si];
             if ((uint64_t) stage.live.ids.size() != panel.end_tokens - panel.base_tokens)
                 return bad("token slice");
+            st.live.ids.resize((size_t) panel.base_tokens);
+            st.live.imgs.erase(std::remove_if(st.live.imgs.begin(), st.live.imgs.end(),
+                [&](const ConversationImageKey& image) { return image.start >= (int64_t) panel.base_tokens; }), st.live.imgs.end());
             st.live.ids.insert(st.live.ids.end(), stage.live.ids.begin(), stage.live.ids.end());
             st.live.imgs.insert(st.live.imgs.end(), stage.live.imgs.begin(), stage.live.imgs.end());
         }
@@ -1502,12 +1534,11 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
         for (size_t k = 0; k < panels.size(); ++k) {
             cp_start[si][k] = st.checkpoints.size();
             for (auto& c : panels[k].delta.stages[si].checkpoints) {
-                if (!std::equal(c.ids.begin(), c.ids.end(), st.live.ids.begin()))
-                    return bad("checkpoint prefix");
                 ConversationCheckpoint out_c;
                 out_c.ids = std::move(c.ids);
                 out_c.imgs = std::move(c.imgs);
                 out_c.used = c.used;
+                if (out_c.ids.size() > checkpoint_limits[k]) out_c.ids.clear();
                 st.checkpoints.push_back(std::move(out_c));
             }
         }
@@ -1642,17 +1673,30 @@ ConversationDiskStatus ConversationDiskStore::read_chain_impl(const std::filesys
                     if (first < 0 || units <= 0 || bytes != (uint64_t) units * c_per[si][m][(size_t) e])
                         return bad("lengths");
                     const size_t at = (size_t) first * c_per[si][m][(size_t) e];
-                    if (!dst[(size_t) e]->visit(at, static_cast<size_t>(bytes),
-                            [&](uint8_t* p, size_t chunk, size_t) {
-                                return read_checksummed(p, chunk);
-                            }))
+                    const size_t available = at < dst[(size_t) e]->size() ? dst[(size_t) e]->size() - at : 0;
+                    const size_t retained = std::min<size_t>((size_t) bytes, available);
+                    if (retained && !dst[(size_t) e]->visit(at, retained,
+                            [&](uint8_t* p, size_t chunk, size_t) { return read_checksummed(p, chunk); }))
                         return bad("payload read");
+                    uint64_t remaining = bytes - retained;
+                    scratch.resize(1u << 20);
+                    while (remaining) {
+                        const size_t chunk = (size_t) std::min<uint64_t>(remaining, scratch.size());
+                        if (!read_checksummed(scratch.data(), chunk)) return bad("payload read");
+                        remaining -= chunk;
+                    }
                 }
             }
         }
         if (li != panel.lengths.size()) return bad("section sizes");
         if (checksum != panel.payload_checksum) return bad("payload checksum");
     }
+    for (auto& stage : out.stages)
+        stage.checkpoints.erase(std::remove_if(stage.checkpoints.begin(), stage.checkpoints.end(),
+            [&](const ConversationCheckpoint& checkpoint) {
+                return checkpoint.ids.empty() || checkpoint.ids.size() > stage.live.ids.size() ||
+                       !std::equal(checkpoint.ids.begin(), checkpoint.ids.end(), stage.live.ids.begin());
+            }), stage.checkpoints.end());
     std::fclose(file);
     return ConversationDiskStatus::ok;
 }
