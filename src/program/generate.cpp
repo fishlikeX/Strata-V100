@@ -490,6 +490,11 @@ struct Options {
     /// sent as `BGEN <slot> <max_new> ...` reads its prompt and its first token through the usual path, then
     /// continues in slot <slot> of the batch windows (`BT <slot> <id>` lines, then `BDONE <slot> ...`).
     int batch = 0;
+    /// --batch-lazy (#34): carve only the first slot session at boot; the others materialize on
+    /// demand when a request needs them, taking their VRAM from the expert caches (#533 shrink,
+    /// refilled lazily after).  `parallel`/`--batch` stays the admission ceiling.  Needs
+    /// --vram-elastic (the segmented expert cache) for the runtime shrink.
+    bool batch_lazy = false;
     /// The --batch slots in this many groups pipelined through the stages of a layer split (stage k
     /// runs one group while stage k+1 runs another).  1 = every slot in one window, stage after stage.
     int batch_groups = 1;
@@ -1627,6 +1632,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec") o.spec = std::atoi(next("--spec"));
         else if (a == "--batch") o.batch = std::atoi(next("--batch"));
         else if (a == "--slots") o.batch = std::atoi(next("--slots"));   // the same as --batch
+        else if (a == "--batch-lazy") o.batch_lazy = true;
         else if (a == "--batch-groups") o.batch_groups = std::atoi(next("--batch-groups"));
         else if (a == "--spec-oracle") o.spec_oracle = next("--spec-oracle");
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
@@ -3245,6 +3251,7 @@ int main(int argc, char** argv) {
     // fit trim and the fallback below FREE the excess/failed slots' VRAM here instead of leaking it before the
     // expert cache is sized.
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState, BatchSessionDeleter>>> bslot_ss;
+    std::vector<int64_t> session_bytes_, hold_mib_;   // --batch-lazy: the per-stage carve size and working set
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -3265,6 +3272,8 @@ int main(int argc, char** argv) {
     }
     if (o.batch > 0) {
         bslot_ss.resize(1 + stages.size());
+        session_bytes_.resize(bslot_ss.size());
+        hold_mib_.resize(bslot_ss.size());
         int fit = o.batch;   // the slots every stage could carve
         uint64_t bytes0 = 0;
         // A successful carve is not sufficient: each stage must still have room for its booked working set
@@ -3293,12 +3302,17 @@ int main(int argc, char** argv) {
             const int64_t pf_k_mib = k == 0 ? pf_mib : split_pf_mib;   // the stage sizing's own-buffer price (with ring)
             const int64_t hold_mib = (int64_t) o.vram_reserve_mib + pf_k_mib + mtp_bind_mib
                                    + (k > 0 ? kWindowMib : 0) + kCacheFloorMib;
+            session_bytes_[(size_t) k] = (int64_t) bytes;   // --batch-lazy: the runtime carve re-runs these checks
+            hold_mib_[(size_t) k] = hold_mib;
             // the smallest cache that can still lend the prompt path its smallest chunk (a 256-token loan + the
             // 128-slot floor the lend logic leaves), for this stage's own session
             const int64_t lend_floor = (o.prefill_chunk > 0 && prefill_borrow_available)
                 ? (int64_t) ((strata::prefill::Prefill::bytes_needed(g, k == 0 ? ss : stages[k - 1]->ss, 256)
                               + (uint64_t) blob_b - 1) / (uint64_t) blob_b) + 128 : 0;
-            for (int b = 0; b < fit; ++b) {
+            // --batch-lazy: the boot carves slot 0 only - the expert cache then sizes itself around ONE session
+            // (full residency for the single-stream case) and the other slots materialize on demand (see
+            // carve_slots_to in the session loop), taking their VRAM from the expert cache via the #533 shrink.
+            for (int b = 0; b < (o.batch_lazy ? std::min(fit, 1) : fit); ++b) {
                 // the admission budget: this stage's next carve must leave the booked working set, and a cache the
                 // prompt path can still borrow from - otherwise the first request finds the card full (the note
                 // above): refuse the slot BEFORE carving it, so nothing is allocated and freed
@@ -3374,8 +3388,9 @@ int main(int argc, char** argv) {
             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
             // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
-                                 "expert cache would otherwise hold\n", o.batch,
-                         (double) bytes0 * o.batch / 1073741824.0);
+                                 "expert cache would otherwise hold%s\n", o.batch,
+                         (double) bytes0 * (double) bslot_ss[0].size() / 1073741824.0,
+                         o.batch_lazy ? " (--batch-lazy: the other slots carve on demand)" : "");
         }
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
@@ -6843,6 +6858,84 @@ int main(int argc, char** argv) {
             bool partial = false, partial_from0 = false;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+        // --batch-lazy (#34): materialize slot sessions up to index b (inclusive).  The boot carved slot 0
+        // only and the expert caches sized themselves around it (full residency for the single-stream case);
+        // when a request needs slot k, each stage's cache shrinks by the session's carve (the #533 segments,
+        // refilled lazily after), the session materializes, and the stage verifiers re-init their slot
+        // tables - the captured batch graphs are invalidated there (their baked pointers reference the
+        // sessions this carve replaced) and re-captured on the combinations the new traffic needs.
+        auto carve_slots_to = [&](long b, std::string& err) -> bool {
+            while ((long) bslot_ss[0].size() <= b) {
+                const size_t k = bslot_ss[0].size();          // the next materialized index
+                std::vector<std::unique_ptr<strata::core::SessionState, BatchSessionDeleter>> built;
+                built.reserve(bslot_ss.size());
+                auto grow_shrunk = [&](size_t up_to) {
+                    for (size_t st_k = 0; st_k < up_to && st_k < bslot_ss.size(); ++st_k) {
+                        const strata::core::OnDevice on_g(st_k == 0 ? 0 : stages[st_k - 1]->dev);
+                        strata::core::ExpertCache& cache_k = st_k == 0 ? xcache : stages[st_k - 1]->cache;
+                        std::string gerr;
+                        cache_k.grow(cache_k.keep_bytes_for_free(0), gerr);
+                    }
+                };
+                for (size_t st_k = 0; st_k < bslot_ss.size(); ++st_k) {
+                    const int dev_k = st_k == 0 ? 0 : stages[st_k - 1]->dev;
+                    const strata::core::OnDevice on_k(dev_k);
+                    strata::core::ExpertCache& cache_k = st_k == 0 ? xcache : stages[st_k - 1]->cache;
+                    const uint64_t bytes_k = (uint64_t) session_bytes_[st_k];
+                    std::string serr;
+                    // the admission budget the boot carve checks, re-run here: the cache gives back the
+                    // session's carve and the card must still hold the booked working set afterwards
+                    if (!cache_k.shrink(cache_k.keep_bytes_for_free(bytes_k + (256ull << 20)), serr)) {
+                        err = "the expert cache could not make room (stage " + std::to_string(st_k + 1) + "): " + serr;
+                        grow_shrunk(st_k);
+                        for (auto& u : built) u.reset();
+                        return false;
+                    }
+                    size_t fb = 0, tb = 0;
+                    cudaMemGetInfo(&fb, &tb);
+                    if ((int64_t) fb < (hold_mib_[st_k] << 20)) {
+                        err = "the card does not hold the booked working set after the carve";
+                        grow_shrunk(st_k + 1);
+                        for (auto& u : built) u.reset();
+                        return false;
+                    }
+                    void* buf = nullptr;
+                    if (cudaMalloc(&buf, bytes_k) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        err = "the slot session does not fit after the shrink";
+                        grow_shrunk(st_k + 1);
+                        for (auto& u : built) u.reset();
+                        return false;
+                    }
+                    built.emplace_back(new strata::core::SessionState, BatchSessionDeleter{dev_k, buf});
+                    const int64_t lo_k = bslot_ss[st_k][0]->layer_lo, hi_k = bslot_ss[st_k][0]->layer_hi;
+                    if (strata::core::session_init(g, o.max_context, K, buf, *built.back(), lo_k, hi_k) == 0) {
+                        cudaGetLastError();
+                        err = "session_init failed for the lazy slot";
+                        grow_shrunk(st_k + 1);
+                        for (auto& u : built) u.reset();
+                        return false;
+                    }
+                    strata::core::session_zero(*built.back(), g, nullptr, nullptr);
+                }
+                for (size_t st_k = 0; st_k < bslot_ss.size(); ++st_k)
+                    bslot_ss[st_k].push_back(std::move(built[st_k]));
+                for (size_t k2 = 0; k2 < bslot_ss.size(); ++k2) {
+                    std::vector<strata::core::SessionState*> ptrs;
+                    for (auto& u : bslot_ss[k2]) ptrs.push_back(u.get());
+                    strata::core::Verifier& vk = k2 == 0 ? ver : stages[k2 - 1]->ver;
+                    const strata::core::OnDevice on_k(k2 == 0 ? 0 : stages[k2 - 1]->dev);
+                    if (!vk.init_slots(ptrs, err)) {
+                        for (auto& v : bslot_ss) if (v.size() > k2 + 1) v.resize(k2 + 1);
+                        return false;
+                    }
+                }
+                std::fprintf(stderr, "strata generate: --batch-lazy: carved slot %zu (%.2f GiB taken from the "
+                                     "expert caches, %zu of %d materialized)\n", k,
+                             (double) session_bytes_[0] / 1073741824.0, bslot_ss[0].size(), o.batch);
+            }
+            return true;
+        };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
         double bt_wait0 = 0, bt_pool0 = 0;
@@ -7165,6 +7258,17 @@ int main(int argc, char** argv) {
                     std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", o.batch);
                     std::fflush(stdout);
                     continue;
+                }
+                // --batch-lazy (#34): a request for slot b beyond the materialized sessions carves them
+                // first (the expert caches shrink; admission keeps the booked working set).  On refusal
+                // the request errors and the caller retries - nothing half-built stays behind.
+                if (o.batch_lazy && b >= (long) bslot_ss[0].size()) {
+                    std::string lerr;
+                    if (!carve_slots_to(b, lerr)) {
+                        std::printf("ERR BGEN: lazy carve failed: %s\n", lerr.c_str());
+                        std::fflush(stdout);
+                        continue;
+                    }
                 }
                 admit_slot = (int) b;
                 admit_max_new = mn;

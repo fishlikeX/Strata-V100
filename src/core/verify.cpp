@@ -1787,22 +1787,30 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
             return false;
         }
     }
+    // --batch-lazy (#34): a re-init after a runtime carve.  The batch staging buffers are allocated
+    // ONCE for the ceiling (max_t_) and never move - the captured graphs bake their pointers, and a
+    // re-init with a larger S only widens the slot table.  The captured graphs stay valid: their
+    // sessions persist once carved (this mode never releases), and new row combinations capture on
+    // first use (exec_bm_ / commit_bm_ are keyed by the participating rows).
     const strata::kernels::QsaShapes s = shapes_of(*g_);
-    const int64_t S = (int64_t) slots.size(), CB = 2 + max_t_;
     const int64_t TS = (s.idx_block - 1) * g_->idx_key_dim, nQ = g_->n_qsa_layers();
-    void* d = nullptr;
-    if (!mapped((size_t) (S * CB * 4 + 16), (void**) &h_commitb_, (void**) &m_commitb_)) {
-        err = "verify: the batch commit staging failed";
-        return false;
+    if (arena_b_ == nullptr) {
+        const int64_t S_cap = max_t_, CB = 2 + max_t_;
+        const uint64_t a2 = ((uint64_t) S_cap * CB * 4 + 255) & ~255ull;
+        void* d2 = nullptr;
+        if (!mapped((size_t) (S_cap * CB * 4 + 16), (void**) &h_commitb_, (void**) &m_commitb_)) {
+            err = "verify: the batch commit staging failed";
+            return false;
+        }
+        if (cudaMalloc(&d2, a2 + (uint64_t) S_cap * std::max<int64_t>(nQ, 1) * TS * 4) != cudaSuccess) {
+            err = "verify: the batch buffers do not fit";
+            return false;
+        }
+        arena_b_ = d2;
+        commitb_ = (int32_t*) d2;
+        tail_snap_b_ = (float*) ((uint8_t*) d2 + a2);
     }
-    const uint64_t a = ((uint64_t) S * CB * 4 + 255) & ~255ull;
-    if (cudaMalloc(&d, a + (uint64_t) S * std::max<int64_t>(nQ, 1) * TS * 4) != cudaSuccess) {
-        err = "verify: the batch buffers do not fit";
-        return false;
-    }
-    arena_b_ = d;
-    commitb_ = (int32_t*) d;
-    tail_snap_b_ = (float*) ((uint8_t*) d + a);
+    const int64_t S = (int64_t) slots.size();
     slots_ = slots;
     slot_sp_.assign(slots.size(), sampling_);   // greedy until set_slot_sampling
     std::fprintf(stderr, "strata verify: batch windows of up to %lld sequences (layers [%lld, %lld))\n", (long long) S,
