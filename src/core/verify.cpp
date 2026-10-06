@@ -824,9 +824,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     const float* kcb = kcur_ + (size_t) tb * NKV * HD;
                     const float* vcb = vcur_ + (size_t) tb * NKV * HD;
                     if (st.kv_hybrid) {   // K8V4: the unused half's lanes folded onto the used pool (layer.cpp)
+                        const KvHostPools hk = kv_hybrid_k_half(st.host), hv = kv_hybrid_v_half(st.host);
+                        const bool mirror = st.host.present();   // streamed: the host copy too
                         kv_append_q8_batch(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, steps, kcb, kcb,
-                                           n, s, cs, nullptr);
-                        kv_append_q4_batch(st.v_q4, st.v_q4, st.page_table, steps, vcb, vcb, n, s, cs, nullptr);
+                                           n, s, cs, mirror ? &hk : nullptr);
+                        kv_append_q4_batch(st.v_q4, st.v_q4, st.page_table, steps, vcb, vcb, n, s, cs,
+                                           mirror ? &hv : nullptr);
                     } else if (st.kv_q4)
                         kv_append_q4_batch(st.k_q4, st.v_q4, st.page_table, steps, kcb, vcb, n, s, cs, &st.host);
                     else if (st.kv_int8)
