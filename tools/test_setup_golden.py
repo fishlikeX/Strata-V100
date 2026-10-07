@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import types
@@ -51,7 +52,7 @@ def normalize(v, t: Path):
     if isinstance(v, list):
         return [normalize(x, t) for x in v]
     if isinstance(v, str):
-        return v.replace(str(t), "<T>").replace("\\", "/").replace(setup.EXE, "<EXE>")
+        return re.sub(rf"(?<![w.-]){re.escape(setup.EXE)}(?![w.-])", "<EXE>", v.replace(str(t), "<T>").replace("\\", "/"))   # #973: only the whole name, not "strata-x.log" on Linux
     return v
 
 
@@ -140,3 +141,4 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
 def argv_for(family, model):
     """The arguments a setup run for one family and size is given (upstream's behavior tests use it)."""
     return ["--family", family, "--no-start"] + (["--model", model] if model else [])
+
