@@ -6563,7 +6563,7 @@ int main(int argc, char** argv) {
                         "conversation_cache_disk=%d conversation_cache_disk_gib=%lld conversation_cache_disk_records=%zu "
                         "conversation_cache_disk_bytes=%llu conversation_cache_disk_recoveries=%llu "
                         "conversation_cache_disk_corruptions=%llu conversation_cache_keep_root=%d "
-                        "conversation_cache_disk_keep_root=%d%s engine=" STRATA_VERSION "\n",
+                        "conversation_cache_disk_keep_root=%d%s prefill_only=1 engine=" STRATA_VERSION "\n",
                         (long long) o.max_context, o.kv.c_str(),
                         (long long) (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1
                                          ? ss.qsa_states[ss.qsa_primary()].n_slots * 4 : 0),
@@ -7236,7 +7236,9 @@ int main(int argc, char** argv) {
             }
             std::vector<int64_t> ids;
             std::string pe;
-            if (max_new < 1 || endp == nullptr || (geni && emb_path.empty()) || !parse_i64_list(endp, ids, pe)) {
+            // max_new 0 is a PREFILL-ONLY request: the prompt is read and left in the session, nothing is sampled
+            // (no verify window runs at all).  A negative count is still a bad request.
+            if (max_new < 0 || endp == nullptr || (geni && emb_path.empty()) || !parse_i64_list(endp, ids, pe)) {
                 std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
@@ -8266,7 +8268,7 @@ int main(int argc, char** argv) {
             std::vector<int32_t> drafts((size_t) S, 0), window((size_t) S), outv((size_t) S);
             std::vector<float> dprob((size_t) S, 0.0f);
             std::vector<int32_t> sbuf((size_t) S, 0);
-            if (o.suffix_draft > 0) {
+            if (o.suffix_draft > 0 && max_new > 0) {   // a prefill-only request runs no window: nothing to look up
                 sfx.reset();
                 for (int64_t t : ids) sfx.append((int32_t) t);
             }
@@ -8301,6 +8303,9 @@ int main(int argc, char** argv) {
             const int64_t offload0 = drive.d.offload_entries;   // #588
             int64_t decode_checkpoint_at = -1;
             if (cancelled) finish = "cancel";
+            // max_new == 0: the prompt IS the request.  The read above committed n - 1 tokens and nothing more
+            // happens - no window, no sampling, no `T` - so the session is left valid by the same swap below; a STOP
+            // during the read still cancels and leaves it invalid, exactly as for any other request.
             while (!cancelled && produced_n < max_new) {
                 int T = S_mtp;
                 if (req_spec_min_p > 0.0) {
@@ -8593,9 +8598,12 @@ int main(int argc, char** argv) {
             const int64_t req_look = (drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused) - decode_look0;
             const int64_t req_offload = drive.d.offload_entries - offload0;
             // #471: the prompt tokens this request read - all the fresh ones, or as far as the prompt pass got when a
-            // cancel stopped it part-way (a cancelled request used to be logged and counted as having read them all)
+            // cancel stopped it part-way (a cancelled request used to be logged and counted as having read them all).
+            // A prefill-only request (max_new == 0) runs no window, so the prompt's last token - normally the first
+            // window's own input - is never read: its count is one below the fresh prompt's.
             const int64_t fresh = n - resume;
-            const int64_t read_n = cancelled ? std::clamp<int64_t>(pp_reached - resume, 0, fresh) : fresh;
+            const int64_t read_cap = std::max<int64_t>(fresh - (max_new == 0 ? 1 : 0), 0);
+            const int64_t read_n = cancelled ? std::clamp<int64_t>(pp_reached - resume, 0, read_cap) : read_cap;
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
             //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
             //      [prompt tokens read]   (#471: fewer than <prompt> - <reused> when a cancel stopped the read)
@@ -8649,9 +8657,9 @@ int main(int argc, char** argv) {
             // "12288 of 98179" when cancelled mid-read (#471), the rate from what was read
             char read_txt[64];
             if (cancelled)
-                std::snprintf(read_txt, sizeof(read_txt), "%lld of %lld", (long long) read_n, (long long) fresh);
+                std::snprintf(read_txt, sizeof(read_txt), "%lld of %lld", (long long) read_n, (long long) read_cap);
             else
-                std::snprintf(read_txt, sizeof(read_txt), "%lld", (long long) fresh);
+                std::snprintf(read_txt, sizeof(read_txt), "%lld", (long long) read_n);
             std::fprintf(stderr, "strata serve: prompt %lld tokens = %lld reused + %s read in %.0f ms (%.1f tok/s), "
                                  "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %zu checkpoints%s\n",
                          (long long) n, (long long) resume, read_txt, prompt_ms,

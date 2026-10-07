@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -266,7 +267,9 @@ class LiteralThinkTags(unittest.TestCase):
         return self.svc.prepare(messages, tools, kw)[0]
 
     def old_ids(self, messages, tools=None, **kw):
-        return self.tok.encode(self.svc.template.render(messages, tools=tools, **kw), parse_special=True)
+        # the server's own render, historical thinking left out: what mark_think_literals must not change
+        return self.tok.encode(self.svc.template.render(messages, tools=tools, preserve_thinking=False, **kw),
+                               parse_special=True)
 
     def test_a_quoted_tag_in_a_user_message(self):
         text = "Quote this exact literal string, then explain it: </think> and <think>"
@@ -294,10 +297,11 @@ class LiteralThinkTags(unittest.TestCase):
                 {"role": "user", "content": "why did you write </think>"}]
         tools = [{"name": "write", "description": "writes text (may contain </think>)", "parameters": {}}]
         ids = self.ids(msgs, tools)
-        # the template's markers: the history turn's <think>...</think> and the generation prompt's <think>
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        # the historical turn's reasoning_content is left out (an answer-only turn), so the only  thinking here is
+        # the generation prompt's own
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 0))
         text = self.tok.decode(ids)
-        for part in ("It wrote </think> here.", "the </think> tag", "a </think> b", "file has <think> in it",
+        for part in ("It wrote \x3c/think\x3e here.", "a \x3c/think\x3e b", "file has \x3cthink\x3e in it",
                      "why did you write </think>", "may contain </think>"):
             self.assertIn(part, text)
 
@@ -307,7 +311,7 @@ class LiteralThinkTags(unittest.TestCase):
                 {"role": "assistant", "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (3, 2))   # template's + the inline block's
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))   # the inline block's + the generation prompt's
         self.assertIn("Hello, </think> is a tag.", self.tok.decode(ids))
 
     def test_the_real_tokenizer_reads_the_tag_as_text(self):
@@ -2806,6 +2810,289 @@ class LostStep(unittest.TestCase):
     def test_stop_never_acknowledged(self):
         self.run_mode("stop", stream=False)
 
+
+class WarmEngine(MockEngine):
+    """A mock engine that can prefill (GEN 0, INFO prefill_only=1): it records every prefix it is asked to read, and
+    a test can hold one open to watch a foreground request take the engine back."""
+
+    prefill_only = True
+
+    def __init__(self, tok, script, max_context=CTX):
+        super().__init__(tok, script, max_context)
+        self.prefills = []                  # (ids, sampling, embeddings)
+        self.prefilled = threading.Event()  # set when a prefill has been asked for
+        self.hold = False                   # hold the prefill open until `release` or a cancel
+        self.release = threading.Event()
+        self.cancelled = 0
+
+    def prefill(self, ids, sampling, cancel, embeddings=None):
+        self.prefills.append((list(ids), dict(sampling or {}), embeddings))
+        self.prefilled.set()
+        while self.hold and not cancel.is_set():
+            self.release.wait(0.05)
+        if cancel.is_set():
+            self.cancelled += 1
+            return None
+        return {"generated": 0}
+
+
+class ThinkingHistory(unittest.TestCase):
+    """Historical thinking is left out of the prompt by default (a client that drops it would otherwise never match
+    the engine's held state); the reply being generated still thinks, and a request can ask for it back."""
+
+    OPEN = "\x3cthink\x3e"
+    CLOSE = "\x3c/think\x3e"
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.svc = Service(MockEngine(self.tok, "ok", max_context=CTX), self.tok,
+                           ChatTemplate(ROOT / "serve/chat_template.jinja"))
+
+    def text(self, messages, tools=None, **kw):
+        return self.tok.decode(self.svc.encode_prompt(messages, tools, kw))
+
+    def test_historical_thinking_is_left_out_by_default(self):
+        msgs = [{"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1", "reasoning_content": "SECRET-THOUGHT"},
+                {"role": "user", "content": "u2"}]
+        text = self.text(msgs)
+        self.assertNotIn("SECRET-THOUGHT", text)
+        self.assertIn("a1", text)
+        self.assertTrue(text.endswith("<|im_start|>assistant\n" + self.OPEN + "\n"), text[-60:])
+        self.assertEqual(msgs[1]["reasoning_content"], "SECRET-THOUGHT")   # the caller's own messages are untouched
+
+    def test_a_request_can_ask_for_it_back(self):
+        msgs = [{"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1", "reasoning_content": "SECRET-THOUGHT"},
+                {"role": "user", "content": "u2"}]
+        self.assertIn("SECRET-THOUGHT", self.text(msgs, preserve_thinking=True))
+
+    def test_a_tool_loop_leaves_it_out_too(self):
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "reasoning_content": "SECRET-THOUGHT",
+                 "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}]},
+                {"role": "tool", "content": "res"},
+                {"role": "user", "content": "again"}]
+        text = self.text(msgs, [{"name": "f", "parameters": {}}])
+        self.assertNotIn("SECRET-THOUGHT", text)
+        self.assertIn("again", text)
+
+
+class IdlePrefill(unittest.TestCase):
+    """The idle prefill: after a reply the client will send back without its thinking, the canonical next-turn prefix
+    is read into the engine while it is idle (GEN 0, no decode), so the next request reuses it instead of reading it."""
+
+    ANSWER = "The answer is 4."
+    TOOL_CALL = "<tool_call>\n<function=write>\n<parameter=text>\nhi\n</parameter>\n</function>\n</tool_call>"
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.engine = WarmEngine(self.tok, self.ANSWER, max_context=CTX)
+        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+
+    def tearDown(self):
+        self.engine.release.set()
+        self.svc.stop_warm()
+
+    def script(self, text):
+        end = self.tok.encode("<|im_end|>", parse_special=True)
+        self.engine.scripts = [self.tok.encode(text, parse_special=True) + end]
+        self.engine.script = self.engine.scripts[0]
+
+    def chat(self, messages, tools=None, cancel=None, **kw):
+        kw.setdefault("enable_thinking", False)          # the scripted replies are plain content, not thinking
+        ids, thinking, max_new = self.svc.prepare(messages, tools, kw, max_new=256)
+        done = None
+        for kind, x in self.svc.run(ids, thinking, tools, max_new, kw, cancel or threading.Event()):
+            if kind == "done":
+                done = x
+        return ids, done
+
+    def warm(self):
+        self.assertTrue(self.engine.prefilled.wait(5), "the idle prefill never ran")
+        return self.engine.prefills[-1]
+
+    def test_a_plain_reply_warms_the_next_turn_prefix(self):
+        # the client drops this reply's thinking, so its next prompt renders the answer only: the engine's held state
+        # (which has the real thinking) diverges, and the canonical prefix is what the idle prefill reads
+        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.ANSWER)
+        messages = [{"role": "user", "content": "2+2?"}]
+        self.chat(messages, enable_thinking=True)
+        ids, _, emb = self.warm()
+        self.assertIsNone(emb)
+        follow = [*messages, {"role": "assistant", "content": self.ANSWER}, {"role": "user", "content": "and 3+3?"}]
+        real = self.svc.encode_prompt(follow, None, {"enable_thinking": True})
+        self.assertEqual(real[:len(ids)], ids)
+        self.assertGreater(len(ids), 8)
+
+    def test_a_tool_call_warms_the_tool_result_prefix(self):
+        # a thinking reply: its tool call renders with the empty thinking block, so the engine's held state (the real
+        # thinking) diverges from the canonical prefix and the prefix is worth reading ahead
+        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.TOOL_CALL)
+        tools = [{"name": "write", "description": "w", "parameters": {"properties": {"text": {"type": "string"}}}}]
+        messages = [{"role": "user", "content": "go"}]
+        self.chat(messages, tools, enable_thinking=True)
+        ids, _, _ = self.warm()
+        reply = {"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {"name": "write", "arguments": {"text": "hi"}}}]}
+        follow = [*messages, reply, {"role": "tool", "content": "done"}]
+        real = self.svc.encode_prompt(follow, tools, {"enable_thinking": True})
+        self.assertEqual(real[:len(ids)], ids)
+
+    def test_an_image_reply_reuses_the_request_embeddings(self):
+        class FakeVision:
+            def __init__(self, d):
+                self.dir = Path(d)
+                self.rows = self.dir / "img.sve"
+                self.rows.write_bytes(b"rows")
+
+            def encode(self, source):
+                return self.rows, 3
+
+        with tempfile.TemporaryDirectory() as d:
+            self.svc.vision = FakeVision(d)
+            pad = self.tok.encode("<|image_pad|>", parse_special=True)[0]
+            messages = [{"role": "user", "content": [{"type": "text", "text": "what is this?"},
+                                                     {"type": "image", "source": "x.png"}]}]
+            self.chat(messages)
+            ids, _, emb = self.warm()
+            self.assertEqual(ids.count(pad), 3)               # the image's three rows, not re-encoded
+            self.assertTrue(emb and Path(emb).name.startswith("req-"))
+            deadline = time.time() + 5                        # the worker owns the file: it unlinks it after the read
+            while Path(emb).exists() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(Path(emb).exists())
+            follow = [*messages, {"role": "assistant", "content": self.ANSWER}, {"role": "user", "content": "why?"}]
+            real = self.svc._expand_images(self.svc.encode_prompt(follow, None, {"enable_thinking": False}), [3])
+            self.assertEqual(real[:len(ids)], ids)
+
+    def test_a_cancelled_reply_is_not_warmed(self):
+        cancel = threading.Event()
+        cancel.set()
+        self.chat([{"role": "user", "content": "hi"}], cancel=cancel)
+        time.sleep(0.1)
+        self.assertEqual(self.engine.prefills, [])
+
+    def test_a_truncated_tool_call_is_not_warmed(self):
+        self.script("<tool_call>\n<function=write>\n<parameter=text>\nhi")
+        tools = [{"name": "write", "description": "w", "parameters": {"properties": {"text": {"type": "string"}}}}]
+        self.chat([{"role": "user", "content": "go"}], tools)
+        time.sleep(0.1)
+        self.assertEqual(self.engine.prefills, [])
+
+    def test_a_client_that_keeps_its_thinking_is_not_rewarmed(self):
+        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.ANSWER)
+        self.chat([{"role": "user", "content": "hi"}], enable_thinking=True, preserve_thinking=True)
+        time.sleep(0.1)
+        self.assertEqual(self.engine.prefills, [])
+
+    def test_a_foreground_request_stops_a_held_prefill(self):
+        self.engine.hold = True
+        self.chat([{"role": "user", "content": "first"}])
+        self.assertTrue(self.engine.prefilled.wait(5))
+        history0, totals0 = len(self.svc.history), self.svc.totals["requests"]
+        second = {}
+        thread = threading.Thread(target=lambda: second.update(
+            done=self.chat([{"role": "user", "content": "second"}])[1]))
+        thread.start()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(second["done"]["finish"], "stop")
+        self.assertEqual(self.engine.cancelled, 1)             # the held prefill gave way to the request
+        self.assertEqual(len(self.svc.history), history0 + 1)  # only the request's own figures were recorded
+        self.assertEqual(self.svc.totals["requests"], totals0 + 1)
+
+    def test_a_batch_engine_never_warms(self):
+        self.engine.batch = 4
+        self.assertFalse(self.svc.schedule_warm([1, 2, 3], {}))
+        time.sleep(0.05)
+        self.assertEqual(self.engine.prefills, [])
+
+    def test_an_unloaded_engine_is_not_prefilled(self):
+        self.engine.unloaded = True
+        self.svc.schedule_warm([1, 2, 3], {})
+        time.sleep(0.2)
+        self.assertEqual(self.engine.prefills, [])
+
+class PrefillCancellation(unittest.TestCase):
+    """The idle prefill gives way to a foreground request promptly: a cancel STOPs the read within a poll, not after a
+    queue.get() timeout (a whole heartbeat), and it never records the warm as a request's figures."""
+
+    class Stdin(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.stopped = threading.Event()
+
+        def write(self, text):
+            n = super().write(text)
+            if "STOP" in text:
+                self.stopped.set()
+            return n
+
+    class Lines(queue.Queue):
+        def __init__(self):
+            super().__init__()
+            self.waiting = threading.Event()
+
+        def get(self, *args, **kwargs):
+            self.waiting.set()
+            return super().get(*args, **kwargs)
+
+    def engine(self):
+        eng = StrataEngine.__new__(StrataEngine)          # no process: the lines are fed from the test
+        eng.proc = SimpleNamespace(stdin=self.Stdin(), poll=lambda: None)
+        eng.lines = self.Lines()
+        eng.prefill_only = True
+        eng.can_stop = True
+        eng.silence_s = 0
+        eng.ended = False
+        eng.progress = None
+        eng.last = {"sentinel": 1}
+        return eng
+
+    def test_a_cancel_stops_a_quiet_read_promptly(self):
+        eng = self.engine()
+        cancel, result = threading.Event(), {}
+        thread = threading.Thread(target=lambda: result.update(done=eng.prefill([1, 2, 3, 4, 5, 6], {}, cancel)))
+        thread.start()
+        try:
+            self.assertTrue(eng.lines.waiting.wait(2))
+            cancel.set()
+            self.assertTrue(eng.proc.stdin.stopped.wait(2), "the prefill never sent STOP")
+        finally:
+            cancel.set()
+            eng.lines.put("DONE 0 6 0 0 cancel\n")
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(result["done"])
+        self.assertEqual(eng.last, {"sentinel": 1})
+        self.assertIsNone(eng.progress)
+
+    def test_a_cancel_is_seen_while_progress_keeps_arriving(self):
+        eng = self.engine()
+        cancel, result, feed_on = threading.Event(), {}, threading.Event()
+        def feed():
+            while not feed_on.is_set():
+                eng.lines.put("PP 2 6 0 100.0\n")
+                feed_on.wait(0.005)
+
+        producer = threading.Thread(target=feed)
+        producer.start()
+        thread = threading.Thread(target=lambda: result.update(done=eng.prefill([1, 2, 3, 4, 5, 6], {}, cancel)))
+        thread.start()
+        try:
+            self.assertTrue(eng.lines.waiting.wait(2))
+            cancel.set()
+            self.assertTrue(eng.proc.stdin.stopped.wait(2), "the prefill never sent STOP while progress arrived")
+        finally:
+            feed_on.set()
+            producer.join(timeout=2)
+            cancel.set()
+            eng.lines.put("DONE 0 6 0 0 cancel\n")
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(producer.is_alive())
+        self.assertIsNone(result["done"])
 
 if __name__ == "__main__":
     unittest.main()
