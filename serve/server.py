@@ -257,9 +257,11 @@ def parse_disk_line(line: str) -> dict | None:
     The engine writes six shapes (src/program/generate.cpp): the store opening, a park, a read, a restore, a miss
     and a skipped or failed park.  The opening line is `<dir> budget=N GiB recovered=N bytes=N ...` and is the only
     one with `budget=`; the others start with their event and end their head at `;`, followed by the counters that
-    matter (a skipped park has no `;` at all).  So the opening line is recognised by its budget, the counters are
-    read generically, and only the event's own numbers are matched.  Anything unrecognised gives None: a log line
-    must never be able to stop the server, and an engine without the feature writes none of these at all."""
+    matter (a skipped park has no `;` at all).  Parking the conversation's root image prefixes the park's event with
+    "root" ("root parked N tokens ..."), so it is matched as a park too.  So the opening line is recognised by its
+    budget, the counters are read generically, and only the event's own numbers are matched.  Anything unrecognised
+    gives None: a log line must never be able to stop the server, and an engine without the feature writes none of
+    these at all."""
     i = line.find(DISK_LINE)
     if i < 0:
         return None
@@ -272,9 +274,9 @@ def parse_disk_line(line: str) -> dict | None:
                     **_disk_counters(head)}
     counters = _disk_counters(tail or head)
     ms = re.search(r"in ([\d.]+) ms", head)
-    if head.startswith("parked"):
-        m = re.match(r"parked (\d+) tokens", head)
-        return {"event": "park", "tokens": int(m.group(1)) if m else None,
+    parked = re.match(r"(?:root )?parked (\d+) tokens", head)
+    if parked:
+        return {"event": "park", "tokens": int(parked.group(1)),
                 "ms": float(ms.group(1)) if ms else None, **counters}
     if head.startswith("read "):
         m = re.match(r"read \S+ (\d+) stages", head)
@@ -447,9 +449,11 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
 class ConvCacheLog:
     """#596: the engine's conversation cache as its log tells it (the engine writes "strata serve: conversation
     cache: parked N tokens ...; parked=P bytes=B evictions=E" and "restored N tokens ...; parked=P bytes=B" to stderr,
-    which is the log): read on from where it was last read, from the start of the engine's current run."""
-    EVENT = re.compile(r"conversation cache: (parked|skipped|restored) (\d+) tokens.*?parked=(\d+) bytes=(\d+)"
-                       r"(?: evictions=(\d+))?")
+    which is the log): read on from where it was last read, from the start of the engine's current run.  Parking the
+    conversation's root image writes the same line with an extra "root" ("parked root N tokens ...", and "skipped
+    root ..." when the put fails), so the verb takes an optional "root"."""
+    EVENT = re.compile(r"conversation cache: (parked|skipped|restored)(?: root)? (\d+) tokens.*?parked=(\d+) "
+                       r"bytes=(\d+)(?: evictions=(\d+))?")
     DROPPED = re.compile(r"conversation cache: dropped \d+ superseded .*?parked=(\d+)")
     READ_MAX = 1 << 20                                  # at most the last MiB of new lines per read
 

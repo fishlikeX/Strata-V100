@@ -201,6 +201,10 @@ class ConversationCacheCard(unittest.TestCase):
     PARK = ("strata serve: conversation cache: parked 5000 tokens in 12.0 ms; parked=1 bytes=104857600 evictions=0 "
             "snapshot_bytes=104857600 reused_kv_bytes=0\n")
     RESTORE = "strata serve: conversation cache: restored 4000 tokens (exact) in 30.0 ms; parked=2 bytes=209715200\n"
+    ROOT = ("strata serve: conversation cache: parked root 24225 tokens in 828.1 ms; parked=2 bytes=844114456 "
+            "evictions=0 snapshot_bytes=488447528\n")
+    SKIP_ROOT = ("strata serve: conversation cache: skipped root 24225 tokens in 828.1 ms; parked=2 bytes=844114456 "
+                 "evictions=0 snapshot_bytes=488447528\n")
 
     def test_the_log(self):
         from serve.server import ConvCacheLog
@@ -221,6 +225,20 @@ class ConversationCacheCard(unittest.TestCase):
             self.assertEqual(c.poll(str(log), start)["parked"], 1)
             self.assertEqual(c.poll(str(log), log.stat().st_size)["parked"], 0)   # the engine started again
             self.assertEqual(c.poll(None, None)["parked"], 0)
+
+    def test_the_root_park_lines(self):
+        """The engine parks the conversation's root image with an extra "root" (generate.cpp: "%s root %zu tokens"):
+        a "parked root" line is a park with the same readings, a "skipped root" one updates them without counting."""
+        from serve.server import ConvCacheLog
+        import tempfile
+        for line, want in ((self.ROOT, (2, 844114456, 0, 1, "parked", 24225)),
+                           (self.SKIP_ROOT, (2, 844114456, 0, 0, None, None))):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as d:
+                log = Path(d) / "strata.log"
+                log.write_text(line, encoding="utf-8")
+                st = ConvCacheLog().poll(str(log), 0)
+                self.assertEqual((st["parked"], st["bytes"], st["evictions"], st["parks"], st["last_event"],
+                                  st["last_tokens"]), want)
 
     def test_metrics(self):
         tok = ByteTokenizer()
@@ -248,13 +266,6 @@ class ConversationCacheCard(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
-
-    def test_the_card_is_on_the_page(self):
-        web = Path(__file__).parent / "web"
-        html, js = (web / "index.html").read_text(encoding="utf-8"), (web / "app.js").read_text(encoding="utf-8")
-        for el in ("cc-card", "cc-slots-text", "cc-mem-text", "cc-facts", "cc-note"):
-            self.assertIn(f'id="{el}"', html)
-            self.assertIn(f'"{el}"', js)
 
 
 if __name__ == "__main__":

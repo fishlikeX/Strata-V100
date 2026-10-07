@@ -1023,10 +1023,11 @@ INT8, Q4_0 and identity-layout K8V4 snapshots are supported; the K8V4 draft ring
 remains INT8, as in upstream. Windows/HIP and multi-GPU runtime coverage must be
 reported separately from Linux/CUDA evidence.
 
-The web page's Monitor tab has a **Conversation cache** card (0.1.39, #596): the parked conversations against the
-slots and the RAM budget, how many were parked, restored and evicted, and the last switch (read from the engine's
-log), and for every setup how many prompt tokens the cache gave back - in the last request and since the start.
-`/metrics` has the same under `"conversation_cache"`.
+The web page's Monitor tab has a **RAM tier (L2)** card. The `/api-monitor` page also
+shows L2 RAM and L3 disk use. The L2 display shows parked conversations, the slot
+limit, RAM use, the byte budget, parks, restores, evictions, and prompt-token reuse.
+Root parks are included in the counters. `/metrics` supplies the same data in
+`"conversation_cache"` and `"l3"`.
 
 Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
 They add host RAM, not another model or VRAM allocation. The byte budget also counts
@@ -1045,6 +1046,12 @@ again after capture. Unknown telemetry or insufficient RAM skips parking. Window
 uses `GlobalMemoryStatusEx`, Linux uses `MemAvailable`; these are host-level samples,
 not a reservation or enforcement of container/job memory limits. An 8 GiB budget
 is a cap, not a recommendation for every machine.
+The slot limit and the byte budget apply together. For example,
+`--conversation-cache-mib 15360 --conversation-cache-slots 32` permits up to
+32 parked entries within a 15 GiB RAM budget. The engine does not allocate the
+whole budget at startup. Root images also use slots and RAM. Increase the slot
+limit if slot eviction occurs before the byte limit is reached. Keep the
+physical-RAM headroom check enabled.
 
 The shared snapshot core validates all layers and checkpoints before applying any
 state. Invalid entries are discarded; transfer/synchronization failure is fatal
@@ -1078,11 +1085,12 @@ prefix its own 'p'-class record on disk. Their `--no-` variants turn each pin of
 A request reuses a record only when its prompt starts with exactly the record's tokens and
 images, and its control-vector mode matches. The store keeps the longest matching prefix; an equal-length
 tie prefers the smaller record: the system-prompt prefix over the conversation record that contains it.
-Across the live session, the RAM cache, the disk
-tier and the idle batch slots, the longest valid prefix wins: the engine takes a disk record
-only when it strictly improves on live GPU or slot state (verified - a 25-token record
-does not displace a 152-token state, nor a 172-token record a 299-token one). No client
-session ID is needed.
+Across the live session, the RAM cache, the disk tier and the idle batch slots,
+the longest valid prefix wins. A disk record is used only when its prefix is
+strictly longer than each available resident prefix. An equal-length RAM
+match uses L2, not L3. An equal-length live or idle-slot match stays resident.
+L3 can still supply a longer prefix, or restore a conversation after L2 eviction.
+No client session ID is needed.
 
 **The shared system prompt (captured once).** When a fresh chat's prompt is read from token 0, the engine
 checkpoints the end of the system prompt (the first turn boundary) if that is `--prompt-cache-root` tokens

@@ -7437,9 +7437,11 @@ int main(int argc, char** argv) {
                 }
             const auto parked = conversations.best(ids, req_imgs, want_cvec);
             finish_disk_write();
-            // Pick the longest compatible prefix across live state, RAM, disk and slot sessions. Disk must
-            // strictly improve on live or slot state; otherwise retain that resident state and avoid I/O.
-            // Validate the file before taking a RAM image so a bad record cannot discard the RAM fallback.
+            // Pick the longest compatible prefix across live state, RAM, disk and slot sessions. A tier
+            // must strictly improve on the resident state: disk must beat live, RAM and any slot session,
+            // and an equal-length RAM image wins the tie (it restores from host memory without a file
+            // read, and the equal disk record holds nothing it does not). Validate the file before taking
+            // a RAM image so a bad record cannot discard the RAM fallback.
             // The store's API takes the 32-bit token ids its images hold; the request's are 64-bit (and were
             // range-checked against the vocabulary above, so the narrowing is exact).
             std::vector<int32_t> disk_ids;
@@ -7452,8 +7454,8 @@ int main(int argc, char** argv) {
             const bool disk_hit = disk_enabled && disk.best(disk_ids, req_imgs, want_cvec, dmatch);
             bool disk_chosen = false;
             strata::core::ConversationDiskRecord record;
-            if (disk_hit && dmatch.tokens > resume && dmatch.tokens >= parked.tokens &&
-                (slot_source < 0 || dmatch.tokens > slot_tokens)) {
+            if (strata::program::conv_cache::disk_reuse_wins(disk_hit, dmatch.tokens, parked.tokens, resume,
+                                                             slot_tokens, slot_source >= 0)) {
                 const auto t_read = Clock::now();
                 std::string derr;
                 const strata::core::ConversationDiskStatus got = disk.get(dmatch.name, record, derr);
@@ -7511,7 +7513,8 @@ int main(int argc, char** argv) {
                 }
             }
             std::optional<strata::core::SavedConversation> incoming;
-            if (!disk_chosen && parked.tokens > std::max(resume, slot_tokens))
+            if (!disk_chosen &&
+                strata::program::conv_cache::ram_reuse_wins(parked.tokens, resume, slot_tokens))
                 incoming.emplace(conversations.take(parked.index));
             if (incoming) slot_source = -1;
             if (disk_enabled && !disk_chosen) {
