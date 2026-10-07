@@ -3520,12 +3520,32 @@ int main(int argc, char** argv) {
         std::vector<int64_t> best, at((size_t) ns - 1);
         double best_ms = 1e30, best_mass = 0;
         int64_t best_held = 0, tried = 0;
+        // TIES GO TO THE BALANCED PLACEMENT.  When every placement holds the whole profile (the model fits the cards,
+        // as IQ3_S does on two or more 32 GB cards) the predicted decode window is the same for all of them - the
+        // layers' times just add - and which one "won" was floating-point noise in the sum: 3 layers on the first
+        // card, 30 on the second.  A prompt flows through the stages as a pipeline, so its speed is the slowest stage's:
+        // measured on 4x R9700 with --trim-stage-weights, 6,36,41 read a 32K prompt at 1,750 tok/s and 12,24,36 at 2,780,
+        // same decode speed, same tokens.  Among placements whose window time agrees to 1e-6 ms the one with the
+        // smallest slowest stage (layers x ms per layer) is kept; an earlier one stays on a second tie.
+        double best_max = 1e30;
+        auto stage_max = [&](const std::vector<int64_t>& cuts) {
+            double m = 0;
+            for (int i = 0; i < ns; ++i) {
+                const int64_t lb = i == 0 ? 0 : cuts[(size_t) i - 1], le = i + 1 < ns ? cuts[(size_t) i] : g.n_layers;
+                m = std::max(m, (double) (le - lb) * layer_ms[(size_t) i]);
+            }
+            return m;
+        };
+        const double tie_eps = 1e-6;
         auto consider = [&]() {
             double hm = 0;
             int64_t held = 0;
             const double ms = predict(at, hm, held);
             ++tried;
-            if (ms < best_ms) { best = at; best_ms = ms; best_mass = hm; best_held = held; }
+            const double mx = stage_max(at);
+            if (ms < best_ms - tie_eps || (ms <= best_ms + tie_eps && mx < best_max - tie_eps)) {
+                best = at; best_ms = std::min(ms, best_ms); best_mass = hm; best_held = held; best_max = mx;
+            }
         };
         const int64_t L = g.n_layers;
         // share the layers in proportion to speed: the fallback beyond four GPUs, and the only placement a
@@ -3601,9 +3621,11 @@ int main(int argc, char** argv) {
                                           (double) k1 * layer_ms[0] + (double) (k2 - k1) * layer_ms[1] +
                                           (double) (k3 - k2) * layer_ms[2] + (double) (L - k3) * layer_ms[3];
                         ++tried;
-                        if (ms < best_ms) {
+                        const double mx = stage_max({k1, k2, k3});
+                        if (ms < best_ms - tie_eps || (ms <= best_ms + tie_eps && mx < best_max - tie_eps)) {
                             best = {k1, k2, k3};
-                            best_ms = ms;
+                            best_ms = std::min(ms, best_ms);
+                            best_max = mx;
                             best_mass = hm / denom;
                             best_held = held_at[a] + held_at[b] + held_at[c] + held_at[d];
                         }
@@ -6344,6 +6366,8 @@ int main(int argc, char** argv) {
                 }
             }
             if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
+            // the pool is idle while a prompt is read unless batch slots decode between its parts
+            if (!multi_gpu && o.batch <= 0 && !o.no_pool) sp.set_cpu_pool(&pool);
             if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes))
                 return err.find("do not fit") != std::string::npos ? 2 : 1;
             return 0;
@@ -11456,6 +11480,7 @@ int main(int argc, char** argv) {
             }
         }
         mem_mark("the decode graphs, before the prompt path's buffers");
+        if (!multi_gpu && !o.no_pool) prefill.set_cpu_pool(&pool);
         if (!prefill.init(wt, g, ss, srcp, o.expert_cache > 0 ? &xcache : nullptr,
                           host_res.empty() ? nullptr : host_res.data(), o.prefill_chunk, main_cs, err, borrow,
                           borrow_bytes)) {
@@ -11519,10 +11544,11 @@ int main(int argc, char** argv) {
         ss.ple_prev[1] = pos_start >= 1 ? (int32_t) o.tokens[(size_t) (pos_start - 1)] : -1;
         const strata::prefill::PrefillStats& ps = prefill.stats();
         std::fprintf(stderr, "strata generate: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
-                             "streamed %lld (%lld by DMA, host %.1f ms), resident %lld; PLE %.1f ms\n",
+                             "streamed %lld (%lld by DMA, host %.1f ms), resident %lld, on the CPU %lld (share %.2f); PLE %.1f ms\n",
                      (long long) ps.tokens, (long long) ps.chunks, ps.ms_total,
                      ps.ms_total > 0 ? 1000.0 * (double) ps.tokens / ps.ms_total : 0.0, (long long) ps.experts_streamed,
-                     (long long) ps.experts_dma, ps.ms_experts_host, (long long) ps.experts_resident, ps.ms_ple);
+                     (long long) ps.experts_dma, ps.ms_experts_host, (long long) ps.experts_resident,
+                     (long long) ps.experts_cpu, ps.cpu_share, ps.ms_ple);
     }
 
     if (!kvg_started) {   // the elastic K/V of a prompt that was not read in batches
