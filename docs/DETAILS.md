@@ -1149,12 +1149,20 @@ After a complete reply, a serial server prepares the exact answer-only history
 with a decode-free idle prefill. It includes completed tool calls and the original
 image embeddings. It does not store hidden thinking in the next prompt or generate
 an extra token. A following request reuses the prepared prefix only if its tokens,
-images, and control-vector mode match.
+images, and control-vector mode match. The server encodes the prefix with the same
+rules as the request, so a control token inside a message stays text.
 
-A foreground request cancels idle prefill before it waits for the engine. The
-engine stops at a safe prompt-read boundary and drains the command before it
-accepts the request. Idle prefill does not replace request metrics. It does not
-load an unloaded model, and it is not used with parallel batch slots.
+A request cancels idle prefill before it waits for the engine. The engine stops at
+a safe prompt-read boundary and drains the command before it accepts the request.
+There is one exception. When the prefill reads the start of that request's own
+prompt, the request waits for the read instead. The request then reuses the read
+and processes fewer tokens. A prefill for a different conversation always gives
+way.
+
+A text request does not cancel idle prefill when it loads an engine that is already
+loaded or prepares its prompt. These steps do not need the engine queue. Image
+encoding, engine loading, and a prefill that does not match the request still cancel
+idle prefill before they use the engine queue.
 
 The rebuild still uses GPU time. If the next request arrives before it completes,
 or changes the history or prompt settings, some prompt processing remains on the

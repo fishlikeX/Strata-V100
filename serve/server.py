@@ -2447,6 +2447,7 @@ class Service:
         self._warm_idle = threading.Event()           # set while there is nothing left to prefill (see wait_warm)
         self._warm_idle.set()
         self._warm_active = False                     # the worker is inside engine.prefill()
+        self._warm_running = None                     # the job the worker took (its ids: what it is reading now)
         self._warm_thread = None
         self._warm_stop = False
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
@@ -2715,11 +2716,12 @@ class Service:
 
     def load(self):
         """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
-        self.cancel_warm()                 # a request is on its way: the idle prefill gives way before we wait
         # a request is on its way: the idle thread must not unload between this and the request's own start
         self.last_request_at = time.time()
         if self.loaded() and not self._vision_need_start():
-            return
+            return                         # nothing to start here: the request needs no engine yet, so the idle
+                                           # prefill is left alone (run() gives way only to a prefill it cannot use)
+        self.cancel_warm()                 # the engine must start (or the encoder must): the prefill gives way
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
         with self.fifo:
@@ -3185,7 +3187,6 @@ class Service:
         prefill reads), so a reply's canonical next-turn prefix can be rendered once the answer is known.  `force`
         (forced_call): without thinking the reply starts with it, so it ends the prompt; with thinking, Service.run
         writes it once the thinking is over."""
-        self.cancel_warm()                 # a request is on its way: the idle prefill gives way (it may hold the FIFO)
         self.req_ctx.pending = None
         fetched = self._note_unreadable_tool_images(messages)
         ids = self.encode_prompt(messages, tools, kwargs)
@@ -3206,6 +3207,8 @@ class Service:
             # run on the GPU at the same time - an encode during a running request left that request stuck at
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
+            self.cancel_warm()          # the encode needs the FIFO: the idle prefill gives way (a request without
+                                        # images needs no engine here, so it leaves the prefill alone - see run())
             with self.fifo:
                 self._warm_cancel.clear()                # this request holds the FIFO now: no prefill is running
                 self._ensure_vision()                    # lazy: hand the GPUs' VRAM back and start it, engine idle
@@ -3312,6 +3315,19 @@ class Service:
         prompt: a smoke test uses it to know the next turn's prefix has been read (or given up on)."""
         return self._warm_idle.wait(timeout)
 
+    def _warm_yield(self, ids):
+        """A request is on its way and wants the engine.  Nothing is cancelled while the idle prefill is not
+        reading (the previous request's tail may still queue this prompt's own prefix).  A queued or running prefill
+        that reads the start of this prompt is this request's own reuse - the tokens it would read itself - so it is
+        left alone: the request waits for the FIFO behind it and then reuses the read.  Anything else (a stale
+        prefix, a read for another conversation) gives way at once, so a request never waits for a prefill it cannot
+        use."""
+        with self._warm_cv:
+            job = self._warm_job or self._warm_running
+        if job is None or warm_prefix(job["ids"], ids):
+            return
+        self.cancel_warm()
+
     @staticmethod
     def _warm_drop(job):
         """A job that will not run: its image embeddings file goes (a job the worker took is dropped by its own
@@ -3373,11 +3389,13 @@ class Service:
                     with self._warm_cv:
                         job, self._warm_job = self._warm_job, None
                         self._warm_active = True
+                        self._warm_running = job            # its ids: what a request compares its prompt against
                     self._warm_prefill(job)
                 finally:
                     self.fifo.release()
                     with self._warm_cv:
                         self._warm_active = False
+                        self._warm_running = None
                     self._warm_settle()
             except Exception as e:                      # never take the worker down: the next request is unaffected
                 print(f"[strata] the idle prefill: {e}", flush=True)
@@ -3419,7 +3437,7 @@ class Service:
         messages = list(ctx["messages"]) + [reply]
         dummy = {"role": "tool", "content": "\u0000warm"} if reply.get("tool_calls") else \
             {"role": "user", "content": "\u0000warm"}
-        marked, marked_tools, changed = mark_think_literals(messages + [dummy], ctx["tools"])
+        marked, marked_tools, changed = mark_think_literals(messages + [dummy], ctx["tools"], self.literals)
         prompt = self.render_history(marked, marked_tools, ctx["kwargs"])
         prompt = prompt[:prompt.rindex("<|im_start|>")]      # the dummy turn is the last one: drop it entirely
         ids = self._encode_rendered(prompt, changed)
@@ -3518,7 +3536,7 @@ class Service:
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
         if not par:
-            self.cancel_warm()             # a request is on its way: the idle prefill gives way before we wait
+            self._warm_yield(ids)          # the idle prefill gives way - unless it reads the start of this prompt
         with self.status_lock:
             self.status["queued"] += 1
         try:
@@ -3813,6 +3831,13 @@ class Service:
         if stops is not None and stops.hit is not None:
             done["stop_sequence"] = stops.hit
         yield "done", done
+
+
+def warm_prefix(warm_ids, prompt_ids) -> bool:
+    """Whether an idle prefill's tokens are the start of a request's prompt: the request then reuses that read, so
+    the prefill is left to finish and the request waits for the engine behind it (see Service._warm_yield)."""
+    n = len(warm_ids)
+    return 0 < n < len(prompt_ids) and prompt_ids[:n] == warm_ids
 
 
 def collect_reply(evs, answer: list, calls: list, announced: set) -> None:

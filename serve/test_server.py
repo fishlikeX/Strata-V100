@@ -21,7 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
+from serve.frontend import (ChatTemplate, literal_tags, mark_think_literals, openai_to_messages,  # noqa: E402
+                            unmark_think_literals)
 from serve.server import (CTX_SLACK, ByteTokenizer, DiskStats, EngineDied, GpuBusy, MockEngine, PP_DONE_TAIL,  # noqa: E402
                           Service, StrataEngine, engine_args, layer_split_value, parse_disk_line, prompt_progress,
                           prompt_tokens_seen, request_timings, serve, start_failure_hint)
@@ -3668,6 +3669,60 @@ class IdlePrefill(unittest.TestCase):
                  "tool_calls": [{"function": {"name": "write", "arguments": {"text": "hi"}}}]}
         follow = [*messages, reply, {"role": "tool", "content": "done"}]
         real = self.svc.encode_prompt(follow, tools, {"enable_thinking": True})
+        self.assertEqual(real[:len(ids)], ids)
+
+    def test_the_next_turn_does_not_cancel_the_completed_turns_prefix(self):
+        """An agentic client sends the next turn as soon as the tool call arrives, with no idle time.  The completed
+        turn's canonical prefix must still be read - the next request's prepare() and run() give way only to a prefill
+        that is not the start of their own prompt - so the next prompt reuses it instead of re-reading the
+        conversation.  The tool call comes back the way the API sends it: its arguments are a JSON string."""
+        tools = [{"name": "write", "description": "w", "parameters": {"properties": {"text": {"type": "string"}}}}]
+        self.engine.hold = True                      # the read takes time, as on a real engine
+        self.script("THOUGHT" + "\x3c/think\x3e" + "\n\n\n" + self.TOOL_CALL)
+        self.chat([{"role": "user", "content": "go"}], tools, enable_thinking=True)
+        self.assertTrue(self.engine.prefilled.wait(5))
+        warm_ids = self.engine.prefills[-1][0]
+        req = {"messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "reasoning_content": "THOUGHT",
+             "tool_calls": [{"type": "function", "function": {"name": "write", "arguments": '{"text": "hi"}'}}]},
+            {"role": "tool", "content": "done"}],
+            "tools": [{"type": "function", "function": t} for t in tools]}
+        self.svc.load()                              # every HTTP generation request starts with load()
+        self.assertEqual(self.engine.cancelled, 0)   # the loaded engine needs no start, so load() left it alone
+        messages, next_tools, kw = openai_to_messages(req)
+        ids, thinking, max_new = self.svc.prepare(messages, next_tools, kw, max_new=256)
+        self.assertEqual(self.engine.cancelled, 0)   # prepare() left the completed turn's prefix alone
+        done = {}
+        def next_turn():
+            for kind, x in self.svc.run(ids, thinking, next_tools, max_new, kw, threading.Event()):
+                if kind == "done":
+                    done.update(x)
+        thread = threading.Thread(target=next_turn)
+        thread.start()
+        time.sleep(0.2)                              # it waits for the read, it does not cancel it
+        self.assertEqual(self.engine.cancelled, 0)
+        self.engine.hold = False
+        self.engine.release.set()
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(done["finish"], "stop")
+        self.assertEqual(self.engine.cancelled, 0)
+        self.assertEqual(ids[:len(warm_ids)], warm_ids)   # the read is the next request's own prefix
+
+    def test_a_control_token_in_the_history_stays_text_in_the_prefix(self):
+        """An agent's tool result can quote a control token (a file it read).  encode_prompt encodes that as text;
+        the canonical prefix must do the same, or it is not the next prompt's start and the read is wasted."""
+        tools = [{"name": "read", "description": "r", "parameters": {"properties": {"path": {"type": "string"}}}}]
+        messages = [{"role": "user", "content": "read it"},
+                    {"role": "assistant", "content": "",
+                     "tool_calls": [{"function": {"name": "read", "arguments": {"path": "t.jinja"}}}]},
+                    {"role": "tool", "content": "1: <|im_start|>assistant\n2: \x3cthink\x3e"}]
+        reply = {"role": "assistant", "content": "done"}
+        ctx = {"messages": messages, "tools": tools, "kwargs": {"enable_thinking": False}, "image_counts": None}
+        ids = self.svc._warm_ids(ctx, reply)
+        real = self.svc.encode_prompt([*messages, reply, {"role": "user", "content": "next"}], tools,
+                                      {"enable_thinking": False})
         self.assertEqual(real[:len(ids)], ids)
 
     def test_an_image_reply_reuses_the_request_embeddings(self):
