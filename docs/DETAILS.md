@@ -792,6 +792,46 @@ Terminal chat: `.venv/bin/python chat.py`.
   streaming (`--kv-resident`) is off and the KV cache stays in VRAM, and the experts are copied to the GPU from
   unpinned RAM (slower prompts than native Linux).
 
+### Starting the V100 IQ3_S server as a user service
+
+The repository's `strata-v100.service` template starts the server as a user service on two Tesla
+V100 cards. It is separate from the default Q2_0 setup above; use it only on the IQ3_S deployment.
+
+Before the first start:
+
+1. Make the checkout available at `~/strata-v100`. A symbolic link to the checkout is sufficient.
+   Check that `strata-iq3_s-arena.json` exists in the checkout and uses the native IQ3_S expert
+   pack, with `STRATA_SPLIT_RING=192` in its `env` object. Keep this configuration and the
+   required `.strata-service.env` file private. Do not commit authentication keys.
+2. Check that the model storage is mounted. The unit runs `/usr/bin/mountpoint --quiet
+   /mnt/strata-models` before the server. When the mount is absent, the start fails and the unit
+   retries after 10 seconds instead of loading a model from an empty disk path.
+3. Install the template and reload the user manager:
+
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp strata-v100.service ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   ```
+
+4. Stop an old manually started server first, so that the new service does not fail on the port that
+   the manual server owns.
+5. Start and enable the service: `systemctl --user enable --now strata-v100.service`.
+6. To start the service at boot before a login, enable lingering: `loginctl enable-linger "$USER"`.
+   The command can need administrator rights; the privilege policy on the machine decides.
+
+Daily commands:
+
+```bash
+systemctl --user restart strata-v100.service
+systemctl --user status strata-v100.service
+curl -fsS http://127.0.0.1:8088/health
+journalctl --user -u strata-v100.service -f
+```
+
+The unit restarts the server after any exit, 10 seconds later, and keeps the model mount as a
+precondition. A missing disk stops the start; it does not load an incomplete model.
+
 ---
 
 ## Sharing the GPU with other programs (optional)

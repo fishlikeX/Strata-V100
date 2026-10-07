@@ -1,5 +1,5 @@
 [Unit]
-Description=Strata Qwen3.8-Flash-Next Q2_0 on Tesla V100
+Description=Strata Qwen3.8-Flash-Next IQ3_S on Tesla V100
 After=network-online.target
 Wants=network-online.target
 
@@ -8,8 +8,10 @@ Type=simple
 WorkingDirectory=%h/strata-v100
 Environment=STRATA_ARENA_LOCK=0
 Environment=STRATA_WATCHDOG_S=300
+Environment=STRATA_SPLIT_RING=192
 EnvironmentFile=%h/strata-v100/.strata-service.env
-ExecStart=%h/strata-v100/.venv/bin/python %h/strata-v100/serve/server.py --engine strata --config %h/strata-v100/strata-q2_0.json --host 0.0.0.0 --port 8088
+ExecStartPre=/usr/bin/mountpoint --quiet /mnt/strata-models
+ExecStart=%h/strata-v100/.venv/bin/python %h/strata-v100/serve/server.py --engine strata --config %h/strata-v100/strata-iq3_s-arena.json --host 0.0.0.0 --port 8088
 Restart=always
 RestartSec=10
 TimeoutStopSec=30
