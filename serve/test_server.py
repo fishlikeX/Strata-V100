@@ -2614,6 +2614,21 @@ class DiskCacheStats(unittest.TestCase):
         self.assertEqual((s["restores"], s["restored_tokens"], s["last_restore_ms"]), (1, 2580, 102.9))
         self.assertEqual(s["miss_events"], 1)
 
+    def test_the_root_park_line_is_a_park(self):
+        """The engine writes "root parked N tokens (+N) ..." when the conversation's root image is seeded to disk
+        (generate.cpp: result.root ? "root parked" : "parked"): the parser must read it as a park, not drop it."""
+        line = ("strata serve: conversation disk: root parked 24225 tokens (+24225) in 975.9 ms; records=13 "
+                "bytes=6825956538 evictions=0 corruptions=0 snapshot_bytes=488447528")
+        self.assertEqual(parse_disk_line(line),
+                         {"event": "park", "tokens": 24225, "ms": 975.9, "records": 13, "bytes": 6825956538,
+                          "evictions": 0, "corruptions": 0, "snapshot_bytes": 488447528})
+        stats = DiskStats()
+        stats.feed(self.LINES[0])
+        stats.feed(line)
+        s = stats.snapshot()
+        self.assertEqual((s["parks"], s["parked_tokens"], s["parked_bytes"], s["last_park_ms"]),
+                         (1, 24225, 488447528, 975.9))
+
     def test_other_lines_and_a_failed_open_are_ignored(self):
         for line in ("", "strata serve: 496 MiB of VRAM free with everything loaded",
                      "strata serve: conversation disk: cannot open /x: permission denied", "DONE 5 3"):

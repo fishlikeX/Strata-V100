@@ -5,8 +5,62 @@ let apiKey = sessionStorage.getItem("strata.monitor.key") || "";
 document.documentElement.dataset.theme = localStorage.getItem("strata.theme") || "dark";
 const seconds = n => typeof n === "number" ? `${n.toFixed(2)} s` : "—";
 const speed = n => typeof n === "number" ? n.toFixed(1) : "—";
+const gb = (b, d = 1) => typeof b === "number" ? `${(b / 1073741824).toFixed(d)} GB` : "—";
+const num = n => typeof n === "number" ? n.toLocaleString() : "—";
+const dur = v => typeof v === "number" ? (v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`) : "—";
+const pct = (v, d = 1) => typeof v === "number" ? `${v.toFixed(d)}%` : "—";
 const active = r => !["completed", "error", "disconnected"].includes(r.state);
 function text(id, value) { const el = $(id); if (el.textContent !== String(value)) el.textContent = value; }
+// the engine's two conversation tiers, straight from /metrics (no second source): a grid of label/value facts each
+function facts(id, rows) {
+  const grid = $(id); grid.replaceChildren();
+  for (const [label, value] of rows) {
+    const cell = document.createElement("div"); cell.className = "fact";
+    const name = document.createElement("span"); name.textContent = label;
+    const val = document.createElement("b"); val.textContent = value;
+    cell.append(name, val); grid.append(cell);
+  }
+}
+function caches(m) {
+  const c = m.conversation_cache || {}, l3 = m.l3 || null;
+  const l2on = Boolean(c.enabled), l3on = Boolean(l3 && l3.on);   // each tier shows only when it is on
+  $("cache-panel").hidden = !l2on && !l3on;
+  $("cache-l2").hidden = !l2on;
+  $("cache-l3").hidden = !l3on;
+  const parked = [];
+  if (l2on) parked.push(`${num(c.parked)} in RAM`);
+  if (l3on) parked.push(`${num(l3.records)} on disk`);
+  text("cache-sub", parked.join(" · "));
+  if (l2on) {
+    const budget = (c.budget_mib || 0) * 1048576;
+    const used = budget ? (100 * (c.bytes || 0)) / budget : null;
+    facts("l2-facts", [
+      ["Parked", `${num(c.parked)} / ${num(c.slots)}`],
+      ["Memory", `${gb(c.bytes)} of ${gb(budget, 0)}`],
+      ["Budget", `${num(c.budget_mib)} MiB`],
+      ["Evictions", num(c.evictions)],
+      ["Parks / restores", `${num(c.parks)} / ${num(c.restores)}`],
+      ["Prompt reuse", c.requests ? `${num(c.requests_reused)} of ${num(c.requests)} requests` : "—"],
+    ]);
+    const last = c.last_event ? `${c.last_event} ${num(c.last_tokens)} tokens` : "—";
+    text("l2-note", `Last switch ${last} · ${num(c.reused_tokens)} prompt tokens reused since start` +
+                    `${used == null ? "" : ` · ${pct(used, 0)} of the RAM budget used`}`);
+  }
+  if (l3on) {
+    const hits = l3.hits || 0, misses = l3.misses || 0;
+    const reuse = hits + misses ? (100 * hits) / (hits + misses) : null;
+    facts("l3-facts", [
+      ["Records", num(l3.records)],
+      ["Store", `${gb(l3.bytes)} of ${gb(l3.budget_bytes, 0)}`],
+      ["Reuse", `${pct(reuse)} · ${num(hits)} / ${num(misses)}`],
+      ["Parked", `${gb(l3.parked_bytes)} · ${num(l3.parks)} parks`],
+      ["Restored", `${num(l3.restored_tokens)} tokens · ${num(l3.restores)}`],
+      ["Evictions / corrupt", `${num(l3.evictions)} / ${num(l3.corruptions)}`],
+    ]);
+    text("l3-note", `Last read ${dur(l3.last_read_ms)} · last park ${dur(l3.last_park_ms)}` +
+                    `${l3.path ? ` · ${l3.path}` : ""}`);
+  }
+}
 async function api(path, body) {
   const response = await fetch(path, {cache:"no-store", headers:{...(apiKey ? {Authorization:`Bearer ${apiKey}`} : {}), ...(body !== undefined ? {"Content-Type":"application/json"} : {})}, ...(body !== undefined ? {method:"POST", body:JSON.stringify(body)} : {})});
   const value = await response.json();
@@ -72,7 +126,7 @@ async function showDetail() {
 }
 async function refresh() {
   try {
-    const [status, history] = await Promise.all([api("/v1/status"), api("/api/requests")]);
+    const [status, history, metrics] = await Promise.all([api("/v1/status"), api("/api/requests"), api("/metrics")]);
     state = status; records = history.requests;
     status.loaded = history.loaded; status.auto_load = history.auto_load;
     if (selected && !records.some(r => r.id === selected)) {
@@ -88,6 +142,7 @@ async function refresh() {
     text("wall", last ? seconds(last.wallclock_s) : "—"); text("speed", speed(last?.timings?.predicted_per_second));
     $("load").disabled = operating || Boolean(inflight) || status.loaded; $("unload").disabled = operating || Boolean(inflight) || !status.loaded;
     list(); if (selected) await showDetail();
+    caches(metrics);
     text("updated", `Live · updated ${new Date().toLocaleTimeString()}`);
     if (!operating) notice(actionError);
   } catch (error) { notice(error.message); text("updated", "Disconnected · retrying"); $("load").disabled = $("unload").disabled = true; }

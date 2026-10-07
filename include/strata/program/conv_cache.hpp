@@ -40,4 +40,21 @@ inline size_t eviction_victim(const uint64_t* stamps, size_t n, int64_t cap) {
     return v;
 }
 
+/// Which parked tier a request resumes from, given the longest compatible prefix each tier holds.  A
+/// longer prefix always wins; on an equal prefix the resident RAM image wins over the disk record: it
+/// restores from host memory without a file read (~0.58 s against the disk's ~2.08 s), and the equal
+/// disk record holds nothing the RAM image does not.  `disk_hit` is the store's own match flag and
+/// `disk_tokens` its matched length; `slot_available` is a slot session that starts this prompt.
+inline bool disk_reuse_wins(bool disk_hit, int64_t disk_tokens, int64_t ram_tokens, int64_t resume,
+                            int64_t slot_tokens, bool slot_available) {
+    return disk_hit && disk_tokens > resume && disk_tokens > ram_tokens &&
+           (!slot_available || disk_tokens > slot_tokens);
+}
+
+/// Whether the parked RAM image is worth taking over the state already on the device: it must be
+/// strictly longer than both the live prefix (`resume`) and a slot session that starts this prompt.
+inline bool ram_reuse_wins(int64_t ram_tokens, int64_t resume, int64_t slot_tokens) {
+    return ram_tokens > (resume > slot_tokens ? resume : slot_tokens);
+}
+
 }  // namespace strata::program::conv_cache
