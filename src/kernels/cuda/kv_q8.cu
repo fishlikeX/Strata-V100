@@ -64,13 +64,22 @@ __device__ __forceinline__ void kv_append_q8_cell(int8_t* k_q, int8_t* v_q, uint
 }
 
 // One block = one 64-value group of one KV head of K (blockIdx.z = 0) or V (1); 64 threads, one value each.
+// MULTI (S26 STRATA_LFUSE): blockIdx.z = 2 * token + (K / V); token j reads step + j * step_stride and its rows at
+// kcur / vcur + j * cur_stride - every token's code is the single launch's
+template <bool MULTI = false>
 __global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
                                     uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
                                     const int32_t* __restrict__ table, const int32_t* __restrict__ step,
                                     const float* __restrict__ kcur, const float* __restrict__ vcur, int kv_heads,
-                                    int head_dim, int page_size, KvHostPools host) {
+                                    int head_dim, int page_size, KvHostPools host, int step_stride = 0,
+                                    int cur_stride = 0) {
+    if constexpr (MULTI) {
+        const int j = blockIdx.z >> 1;
+        step += (size_t) j * step_stride; kcur += (size_t) j * cur_stride; vcur += (size_t) j * cur_stride;
+    }
     kv_append_q8_cell(k_q, v_q, k_scale, v_scale, table, (long long) __ldg(step + kStepPos), kcur, vcur, kv_heads,
-                      head_dim, page_size, blockIdx.x, blockIdx.y, threadIdx.x, blockIdx.z == 1, host);
+                      head_dim, page_size, blockIdx.x, blockIdx.y, threadIdx.x,
+                      MULTI ? (blockIdx.z & 1) == 1 : blockIdx.z == 1, host);
 }
 
 // The verify window's batch: grid.x = the token within the window, grid.z = (is_v, group).  Every cell's
@@ -193,6 +202,18 @@ void kv_append_q8_batch(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v
         k_q, v_q, k_scale, v_scale, page_table, steps, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim,
         (int) s.page_size, (int) n_steps, host ? *host : KvHostPools{});
     check("kv_append_q8 batch launch");
+}
+
+void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale, const int32_t* page_table,
+                        const int32_t* step, int step_stride, const float* kcur, const float* vcur, int cur_stride,
+                        int n_tok, const QsaShapes& s, void* stream, const KvHostPools* host) {
+    validate(s, "kv_append_q8 (steps)");
+    if (n_tok < 1) return;
+    const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / KV_Q8_GROUP), (unsigned) (2 * n_tok));
+    kv_append_q8_kernel<true><<<grid, KV_Q8_GROUP, 0, (cudaStream_t) stream>>>(
+        k_q, v_q, k_scale, v_scale, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim,
+        (int) s.page_size, host ? *host : KvHostPools{}, step_stride, cur_stride);
+    check("kv_append_q8 (steps) launch");
 }
 
 void kv_gather_q8_step(const int8_t* k_q, const int8_t* v_q, const uint16_t* k_scale, const uint16_t* v_scale,

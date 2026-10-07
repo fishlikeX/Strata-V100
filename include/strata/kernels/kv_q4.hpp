@@ -55,6 +55,9 @@ void kv_append_q4_step(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, 
 void kv_append_q4_batch(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, const int32_t* steps,
                         const float* kcur, const float* vcur, int64_t n_steps, const QsaShapes& s, void* stream,
                         const KvHostPools* host = nullptr);
+void kv_append_q4_steps(uint8_t* k_q4, uint8_t* v_q4, const int32_t* page_table, const int32_t* step,
+                        int step_stride, int n_steps, const float* kcur, const float* vcur, const QsaShapes& s,
+                        void* stream, const KvHostPools* host = nullptr);
 
 /// The prompt path: T consecutive (rotated) cells from pos0, K/V [T, n_head_kv, 256]; also into `stage` (identity
 /// layout, the one-layer staging pool of a streamed session) when given.

@@ -67,6 +67,10 @@ The table below records a single-card run on one Tesla V100-PCIE-16GB using PCIe
 | 256K | 256,080 | 617.8 † | 36.8 | 84 °C |
 
 **Test setup:** Qwen3.8-Flash-Next Q2_0; one V100 only (GPU1, PCIe Gen3 x16); Ryzen 5 3600; 48 GB DDR4-3200; CUDA 12.8; 262,144-token context; int8 KV cache; automatic prefill; MTP with `--spec 8` and draft floor 0.70; paired expert variant; 700 MiB vision reserve. Each value is the median of three fresh, uncached requests (`reused=0`) with exactly 256 output tokens. Timings are from the engine's `/metrics` endpoint.
+- **Older graphics cards** (Tesla P40 / V100, GTX 10, Radeon VII / MI50, RX 6700 XT, RX 5500 XT): [Older GPUs](docs/OLDER_GPUS.md).
+- **Intel Arc**, built from source on Linux: [Intel Arc](docs/INTEL_ARC.md).
+- **AMD Ryzen AI Max (Strix Halo)**, built from source on Linux: [Strix Halo](docs/STRIX_HALO.md).
+- **Older processors without AVX2**: they work, but slowly. [Older CPUs](docs/INSTALL.md#older-cpus-experimental).
 
 Before each request, the passively cooled card idled for at least 120 seconds and reached 55 °C or below without software thermal slowdown for 15 seconds. The starting temperatures were 51–55 °C. All requests are included. The 128K and 256K prompts reached 84 °C and experienced software thermal slowdown during prompt processing, despite the cooled start; long runs can throttle. † indicates slowdown during the prompt.
 
