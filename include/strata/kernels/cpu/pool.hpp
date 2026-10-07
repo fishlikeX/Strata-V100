@@ -179,7 +179,9 @@ public:
     /// Plan v0.3 P6: `run_split` for multi-token jobs (at most `kMaxSplitMulti`); the rows of each expert are
     /// read once for all of its tokens.
     void run_split_multi(ExpertJobMulti* jobs, int n);
-    /// Plan v0.3 P6: the same for a native pack's layer (ggml-cpu arithmetic, `nact` activations).
+    /// Native multi-token batches can be submitted by concurrent prefill stages. The complete
+    /// call is serialized, including every scratch-buffer subbatch and its quantization.
+    /// Other pool methods and destruction must not overlap these calls.
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n);
     static constexpr int kMaxSplitMulti = 96;
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
@@ -230,6 +232,7 @@ private:
     /// Bump `epoch_`, and wake the workers that went to sleep.  Every publish goes through here.
     void publish();
 
+    std::mutex native_batch_mutex_;
     int n_ = 0;
     bool host_works_ = true;
     ExpertJob* jobs_ = nullptr;

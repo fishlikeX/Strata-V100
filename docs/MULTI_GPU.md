@@ -97,6 +97,29 @@ This remains an opt-in short-prompt prefill setting, not a universal default.
 See the [expert transfer report](../benchmarks/v100-iq3_s-expert-transfer-2026-10-06.md)
 for the measurements, correctness limits, and reproduction commands.
 
+**CPU assistance for short prefill chunks (opt-in).**
+
+Set `STRATA_PREFILL_CPU_SHARE=auto` to let all eligible layer-split stages use
+the existing CPU expert pool during prefill. A fraction selects a fixed share;
+unset or `0` keeps CPU sharing off. This option requires native expert formats,
+pinned resident host blobs, and prompt chunks below 1,024 tokens. It is not
+enabled with batch slots, `--no-pool`, or an active peer-expert path.
+
+Overlapping GPU stages serialize complete CPU batches on one pool. They do not
+create a worker pool per GPU. The prefill chain drains before decode resumes.
+Read-only pinned expert lookups do not change source counters or staging state.
+
+On two V100 16 GB cards and a Ryzen 5 3600, three interleaved pairs measured
+34.7% lower median prefill latency at 256 tokens and 37.4% at 600 tokens.
+The 2K control was approximately unchanged. Keep automatic chunk sizing;
+forcing 512-token chunks is not a recommended long-prompt optimization.
+
+CPU and GPU activation formats and rounding differ. Answers need not be
+byte-identical, and automatic sharing can vary between runs. The default stays
+off. See the [measurement and ownership report](../benchmarks/v100-multi-gpu-cpu-prefill-2026-10-07.md)
+for the regression, overlap, cancellation, and service checks.
+
+
 **The idle card can help one-chunk prompts (opt-in, `STRATA_PREFILL_HELP=1`).** A prompt that fits one chunk runs the stages one after the other, so while
 one card reads its layers the other idles. With it on, each stage hands a share of its streamed experts to the idle card: it
 streams them over its own PCIe link into its own (lent) prompt buffers, computes their rows on the MMQ path and sends
