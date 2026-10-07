@@ -76,6 +76,23 @@ VRAM keep its own prompt buffers - the same output as 0.1.31, measured on an R97
 differs from the default's (stable and coherent); `STRATA_SPLIT_OWN=auto` does that only where the buffers are at
 most 12% of each card's VRAM.
 
+**Tune the streamed expert ring on a split.** `STRATA_SPLIT_RING=N` sets the
+ring to N expert slots when the engine starts. `STRATA_SPLIT_RING=0` uses the
+normal ring rule. It does not turn streaming off. `STRATA_PREFILL_RING`, if set,
+takes precedence. Each slot holds one whole expert blob. The ring borrows
+capacity from the stage's expert cache during prefill. A smaller ring leaves
+more experts resident but gives the copy stream less lookahead.
+
+On two V100 16 GB cards with Gen3 x4 and x16 links, a native IQ3_S pack and
+layer split 16, the 192-slot ring improved 4K prefill by 4.68% in the initial
+test and 5.39% in a confirmation test against 384 slots. 32K prefill was
+unchanged. A 96-slot ring reduced 32K prefill, and DMA decode was slower than
+the automatic mechanism. These tests show no decode gain and do not rule out
+a decode regression. Keep the ring setting opt-in for short-prompt prefill.
+The private runtime configuration and engine defaults are unchanged.
+See the [expert transfer report](../benchmarks/v100-iq3_s-expert-transfer-2026-10-06.md)
+for the measurements, correctness limits, and reproduction commands.
+
 **The idle card can help one-chunk prompts (opt-in, `STRATA_PREFILL_HELP=1`).** A prompt that fits one chunk runs the stages one after the other, so while
 one card reads its layers the other idles. With it on, each stage hands a share of its streamed experts to the idle card: it
 streams them over its own PCIe link into its own (lent) prompt buffers, computes their rows on the MMQ path and sends

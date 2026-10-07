@@ -1,0 +1,2024 @@
+{
+  "model": "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S",
+  "source_commit": "077ebae6536772ea252521aa30fb1f6777b0084b",
+  "engine_sha256": "903982948bdf67650c9474329dffcb915750e0bf31a043499b3dcd9ead2a38db",
+  "seed": 617,
+  "settings": {
+    "gpu_links": [
+      "Gen3 x4",
+      "Gen3 x16"
+    ],
+    "layer_split": 16,
+    "max_context": 524288,
+    "kv": "int8",
+    "rope_scaling": "yarn",
+    "rope_scale": 2,
+    "spec": 8,
+    "spec_min_p": 0.7,
+    "vram_reserve_mib": 750,
+    "expert_cache": "auto",
+    "expert_slots": [
+      6203,
+      2841
+    ],
+    "pool_workers": 5,
+    "generated_tokens": 128,
+    "temperature": 0,
+    "reuse": false,
+    "power_limit_w": [
+      175,
+      175
+    ]
+  },
+  "arms": [
+    {
+      "label": "ring-default",
+      "ring_slots": 384,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2341,
+        2071
+      ],
+      "env_overrides": [],
+      "extra_args": [],
+      "startup_wall_s": 41.5,
+      "medians": {
+        "4096": {
+          "prefill_tps": 676.73,
+          "decode_tps": 49.5874
+        },
+        "32768": {
+          "prefill_tps": 1633.22,
+          "decode_tps": 52.2002
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6087.9,
+          "prompt_tps": 672.81,
+          "decode_ms": 3152.3,
+          "generated": 128,
+          "draft_accepted": 82,
+          "draft_offered": 89,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 9,
+              "min_temp_c": 42.0,
+              "max_temp_c": 44.0,
+              "mean_temp_c": 42.56,
+              "max_power_w": 86.62,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 9,
+              "min_temp_c": 48.0,
+              "max_temp_c": 52.0,
+              "mean_temp_c": 49.78,
+              "max_power_w": 176.05,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "69ee7855eb5972d569410b602f2dea28173cf0b0c9e18cd72c120ad09067fce2",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6051.1,
+          "prompt_tps": 676.9,
+          "decode_ms": 2581.3,
+          "generated": 128,
+          "draft_accepted": 72,
+          "draft_offered": 87,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 42.0,
+              "max_temp_c": 44.0,
+              "mean_temp_c": 42.75,
+              "max_power_w": 172.04,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 48.0,
+              "max_temp_c": 53.0,
+              "mean_temp_c": 50.62,
+              "max_power_w": 168.82,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "e0bc6da18df122d9e085809a2f555cc3630fe170c54f311fd67a6c3156a4fdee",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6052.6,
+          "prompt_tps": 676.73,
+          "decode_ms": 2284.2,
+          "generated": 128,
+          "draft_accepted": 69,
+          "draft_offered": 78,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 42.0,
+              "max_temp_c": 44.0,
+              "mean_temp_c": 42.88,
+              "max_power_w": 80.79,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 49.0,
+              "max_temp_c": 53.0,
+              "mean_temp_c": 51.0,
+              "max_power_w": 173.19,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "5e35e16ad41562f5e6b189ea55521e244be9fa66336271627a7e047c215e2a11",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20063.4,
+          "prompt_tps": 1633.22,
+          "decode_ms": 2456.2,
+          "generated": 128,
+          "draft_accepted": 86,
+          "draft_offered": 101,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 42.0,
+              "max_temp_c": 48.0,
+              "mean_temp_c": 45.23,
+              "max_power_w": 225.45,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 48.0,
+              "max_temp_c": 58.0,
+              "mean_temp_c": 54.32,
+              "max_power_w": 214.2,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "8329e5e3cf1e1529918bb06b1a0173fec11398ac75dc65a39fb55c615746b071",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20056.9,
+          "prompt_tps": 1633.75,
+          "decode_ms": 2452.1,
+          "generated": 128,
+          "draft_accepted": 77,
+          "draft_offered": 90,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 45.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.62,
+              "max_power_w": 189.4,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 52.0,
+              "max_temp_c": 61.0,
+              "mean_temp_c": 57.62,
+              "max_power_w": 203.37,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "23ef6a731ac9a26735f2ffbd8859f438fc77e868d027f78f3e9421695d5c831e",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20082.4,
+          "prompt_tps": 1631.68,
+          "decode_ms": 2363.4,
+          "generated": 128,
+          "draft_accepted": 81,
+          "draft_offered": 85,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.62,
+              "max_power_w": 169.79,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 53.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 59.24,
+              "max_power_w": 199.87,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "606a8586ab857eba5a3adc01f4f34c7c51a12463b2615227017ed41bf66a370d",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "ring-96",
+      "ring_slots": 96,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        1938,
+        1712
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=96"
+      ],
+      "extra_args": [],
+      "startup_wall_s": 42.1,
+      "medians": {
+        "4096": {
+          "prefill_tps": 700.16,
+          "decode_tps": 49.2497
+        },
+        "32768": {
+          "prefill_tps": 1556.62,
+          "decode_tps": 52.0452
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5971.9,
+          "prompt_tps": 685.88,
+          "decode_ms": 3156.1,
+          "generated": 128,
+          "draft_accepted": 82,
+          "draft_offered": 89,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.25,
+              "max_power_w": 196.13,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 51.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.88,
+              "max_power_w": 198.41,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "69ee7855eb5972d569410b602f2dea28173cf0b0c9e18cd72c120ad09067fce2",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5850.1,
+          "prompt_tps": 700.16,
+          "decode_ms": 2599.0,
+          "generated": 128,
+          "draft_accepted": 72,
+          "draft_offered": 87,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 47.0,
+              "mean_temp_c": 44.25,
+              "max_power_w": 101.61,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 55.0,
+              "mean_temp_c": 53.62,
+              "max_power_w": 187.2,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "e0bc6da18df122d9e085809a2f555cc3630fe170c54f311fd67a6c3156a4fdee",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5840.5,
+          "prompt_tps": 701.31,
+          "decode_ms": 2275.6,
+          "generated": 128,
+          "draft_accepted": 68,
+          "draft_offered": 73,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.25,
+              "max_power_w": 109.44,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.88,
+              "max_power_w": 175.37,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "990c729a1332dd8e468f36d9ee71af539f6698d5acdfe99c48b5203fb1f64805",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21050.8,
+          "prompt_tps": 1556.62,
+          "decode_ms": 2459.4,
+          "generated": 128,
+          "draft_accepted": 86,
+          "draft_offered": 101,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 43.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.39,
+              "max_power_w": 216.5,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 51.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 56.61,
+              "max_power_w": 192.17,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "4bff7bf68f3bac5a9a974acb3870458014c38ec5bad9b272181b91ad17ad367b",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21014.7,
+          "prompt_tps": 1559.29,
+          "decode_ms": 2549.6,
+          "generated": 128,
+          "draft_accepted": 73,
+          "draft_offered": 95,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 44.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.91,
+              "max_power_w": 162.39,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 54.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 59.09,
+              "max_power_w": 202.33,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "4accbd837c24e39244af860e1a9301a902ff383235f7ef94a909b7fdc71d935c",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21084.4,
+          "prompt_tps": 1554.13,
+          "decode_ms": 2383.6,
+          "generated": 128,
+          "draft_accepted": 80,
+          "draft_offered": 85,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.13,
+              "max_power_w": 194.33,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 54.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 59.26,
+              "max_power_w": 200.59,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "c20a16fd5601dc4ad82e2ec079ec87e65579bfe228cf24a5e0be69ebab78d34f",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "ring-192",
+      "ring_slots": 192,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2072,
+        1833
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=192"
+      ],
+      "extra_args": [],
+      "startup_wall_s": 42.0,
+      "medians": {
+        "4096": {
+          "prefill_tps": 708.41,
+          "decode_tps": 50.2532
+        },
+        "32768": {
+          "prefill_tps": 1637.69,
+          "decode_tps": 53.1142
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5803.3,
+          "prompt_tps": 705.81,
+          "decode_ms": 3159.5,
+          "generated": 128,
+          "draft_accepted": 82,
+          "draft_offered": 89,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 9,
+              "min_temp_c": 43.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.0,
+              "max_power_w": 166.6,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 9,
+              "min_temp_c": 51.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.33,
+              "max_power_w": 172.37,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "69ee7855eb5972d569410b602f2dea28173cf0b0c9e18cd72c120ad09067fce2",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5713.8,
+          "prompt_tps": 716.86,
+          "decode_ms": 2547.1,
+          "generated": 128,
+          "draft_accepted": 72,
+          "draft_offered": 82,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 45.0,
+              "mean_temp_c": 44.12,
+              "max_power_w": 192.22,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 54.12,
+              "max_power_w": 152.2,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "a6140e9d146d7ee6660c8a3e086a612dc5a016c0180834c4e1045537b975a55c",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5782.0,
+          "prompt_tps": 708.41,
+          "decode_ms": 2315.5,
+          "generated": 128,
+          "draft_accepted": 70,
+          "draft_offered": 80,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.25,
+              "max_power_w": 123.84,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.88,
+              "max_power_w": 131.62,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "3979e71ce2324dc4da02babeb96b6bf534e155f438352884703097c5bacedcde",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 19944.6,
+          "prompt_tps": 1642.95,
+          "decode_ms": 2337.8,
+          "generated": 128,
+          "draft_accepted": 88,
+          "draft_offered": 100,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 45.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.43,
+              "max_power_w": 209.68,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 51.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 57.1,
+              "max_power_w": 212.64,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "bc79b1245ea8ccf89d354cd4afad8ada75e593ffd8419ce34f1d907cb1f69da8",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20020.2,
+          "prompt_tps": 1636.75,
+          "decode_ms": 2502.8,
+          "generated": 128,
+          "draft_accepted": 77,
+          "draft_offered": 97,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.38,
+              "max_power_w": 177.49,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.48,
+              "max_power_w": 213.52,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "b4b4fdd1e44edc717134dc4f95791f4b28b8db84ae5977612e1d07dee5250d3e",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20008.7,
+          "prompt_tps": 1637.69,
+          "decode_ms": 2409.9,
+          "generated": 128,
+          "draft_accepted": 82,
+          "draft_offered": 92,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 45.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.14,
+              "max_power_w": 208.48,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.55,
+              "max_power_w": 224.78,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "e62b96ac8f70911da1e5b6d67a7d56715de2f17d640447035e1d8bc34fd12f01",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "ring-192-large",
+      "ring_slots": 192,
+      "chunk_tokens": 10752,
+      "borrowed_expert_slots": [
+        2604,
+        2305
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=192"
+      ],
+      "extra_args": [
+        "--prefill",
+        "auto:16384"
+      ],
+      "startup_wall_s": 42.5,
+      "medians": {
+        "4096": {
+          "prefill_tps": 713.46,
+          "decode_tps": 52.6966
+        },
+        "32768": {
+          "prefill_tps": 1501.63,
+          "decode_tps": 54.8603
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5797.7,
+          "prompt_tps": 706.49,
+          "decode_ms": 3201.5,
+          "generated": 128,
+          "draft_accepted": 78,
+          "draft_offered": 86,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 9,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.56,
+              "max_power_w": 122.06,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 9,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.33,
+              "max_power_w": 176.54,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "a3204f55650a7302050cd5fd258cdaa2af49675331db51cd86a1c65325ec0d03",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5720.8,
+          "prompt_tps": 715.98,
+          "decode_ms": 2429.0,
+          "generated": 128,
+          "draft_accepted": 72,
+          "draft_offered": 73,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 45.0,
+              "mean_temp_c": 44.5,
+              "max_power_w": 198.14,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.38,
+              "max_power_w": 167.41,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "054e49d29656de75368901e6bf32a97607a4006b65c0792fd876b6b4b0250eed",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5741.0,
+          "prompt_tps": 713.46,
+          "decode_ms": 2254.0,
+          "generated": 128,
+          "draft_accepted": 78,
+          "draft_offered": 87,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 7,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.86,
+              "max_power_w": 166.31,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 7,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.43,
+              "max_power_w": 191.79,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "f2b6d2faa5b76276cac5b73b6d3256453eca21a75cd828c3f56b04b291ac9f24",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21764.5,
+          "prompt_tps": 1505.57,
+          "decode_ms": 2501.5,
+          "generated": 128,
+          "draft_accepted": 85,
+          "draft_offered": 101,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 44.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 46.57,
+              "max_power_w": 197.77,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 52.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 57.17,
+              "max_power_w": 205.9,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "eb7a473deb934794999f1c9e1c86422bc26c1a6d159bceaec8b6b2b4a4b3ffdb",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21851.7,
+          "prompt_tps": 1499.56,
+          "decode_ms": 2333.2,
+          "generated": 128,
+          "draft_accepted": 83,
+          "draft_offered": 91,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.43,
+              "max_power_w": 225.13,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 54.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 59.35,
+              "max_power_w": 193.87,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "fc5bd7792e0ad084c56a0f36f468104e407d2fca1c9b20351c780568cf4aa8a1",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 21821.6,
+          "prompt_tps": 1501.63,
+          "decode_ms": 2281.8,
+          "generated": 128,
+          "draft_accepted": 89,
+          "draft_offered": 99,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 23,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.57,
+              "max_power_w": 197.03,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 23,
+              "min_temp_c": 54.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 59.39,
+              "max_power_w": 225.89,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "67b625a23081aa558c05558d381858e969e5de2cc92c4978881f376fad9c99f5",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "adapt32",
+      "ring_slots": 192,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2072,
+        1833
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=192"
+      ],
+      "extra_args": [
+        "--adapt-swaps",
+        "32"
+      ],
+      "startup_wall_s": 41.7,
+      "medians": {
+        "4096": {
+          "prefill_tps": 710.01,
+          "decode_tps": 41.9796
+        },
+        "32768": {
+          "prefill_tps": 1640.26,
+          "decode_tps": 48.1004
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5799.4,
+          "prompt_tps": 706.28,
+          "decode_ms": 3290.1,
+          "generated": 128,
+          "draft_accepted": 83,
+          "draft_offered": 90,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 9,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.44,
+              "max_power_w": 138.91,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 9,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.0,
+              "max_power_w": 178.86,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "b644dde202ede0d3d6dbbf7c38742f8e4449c58eb0f13afc806b00fe944603e9",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5731.3,
+          "prompt_tps": 714.67,
+          "decode_ms": 3049.1,
+          "generated": 128,
+          "draft_accepted": 71,
+          "draft_offered": 79,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.5,
+              "max_power_w": 87.45,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.62,
+              "max_power_w": 177.17,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "5d2618ababf3c78c3fa77f8ee87e6395ef569ba3e26508065c54ccab25c51838",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5768.9,
+          "prompt_tps": 710.01,
+          "decode_ms": 2647.3,
+          "generated": 128,
+          "draft_accepted": 70,
+          "draft_offered": 70,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.5,
+              "max_power_w": 81.56,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 57.0,
+              "mean_temp_c": 54.5,
+              "max_power_w": 124.73,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "2fb293fb34f3fa8a6d1ae108dd38a7ab5e8aa4b1d73906d2fec77ca95df15537",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 19936.9,
+          "prompt_tps": 1643.59,
+          "decode_ms": 2661.1,
+          "generated": 128,
+          "draft_accepted": 87,
+          "draft_offered": 98,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.0,
+              "max_power_w": 179.61,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 52.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 57.62,
+              "max_power_w": 212.75,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "dc34e140f7c35e7c05d2d3205d9ff55145b06b713f140085bbd732a1ed99cfc2",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 19977.3,
+          "prompt_tps": 1640.26,
+          "decode_ms": 2718.5,
+          "generated": 128,
+          "draft_accepted": 78,
+          "draft_offered": 92,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.59,
+              "max_power_w": 220.41,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.55,
+              "max_power_w": 211.84,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "aaad140fac4f4b2c23f343dd459d72d6ebb3e470f9e8ccff1bf736e71da5de45",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 19994.6,
+          "prompt_tps": 1638.84,
+          "decode_ms": 2410.0,
+          "generated": 128,
+          "draft_accepted": 81,
+          "draft_offered": 83,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 44.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.36,
+              "max_power_w": 192.56,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.55,
+              "max_power_w": 220.05,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "fc2fd732721725f6ae8cc3e79eab1bccdfdb8041be68f496ee03144899c9a0b6",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "dma",
+      "ring_slots": 192,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2072,
+        1833
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=192"
+      ],
+      "extra_args": [
+        "--pcie-mode",
+        "dma"
+      ],
+      "startup_wall_s": 42.2,
+      "medians": {
+        "4096": {
+          "prefill_tps": 713.1,
+          "decode_tps": 45.0498
+        },
+        "32768": {
+          "prefill_tps": 1633.26,
+          "decode_tps": 46.1378
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5798.0,
+          "prompt_tps": 706.45,
+          "decode_ms": 3394.0,
+          "generated": 128,
+          "draft_accepted": 83,
+          "draft_offered": 88,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 9,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.33,
+              "max_power_w": 82.29,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 9,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 54.11,
+              "max_power_w": 184.93,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "69ee7855eb5972d569410b602f2dea28173cf0b0c9e18cd72c120ad09067fce2",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5722.1,
+          "prompt_tps": 715.82,
+          "decode_ms": 2841.3,
+          "generated": 128,
+          "draft_accepted": 70,
+          "draft_offered": 73,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.5,
+              "max_power_w": 195.24,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 54.0,
+              "max_power_w": 133.52,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "1c09a884485c42b1ec4b98a9373669cdeacbceadc3e670f7e9c9dd9e26877228",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5743.9,
+          "prompt_tps": 713.1,
+          "decode_ms": 2526.0,
+          "generated": 128,
+          "draft_accepted": 70,
+          "draft_offered": 75,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.75,
+              "max_power_w": 164.25,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.88,
+              "max_power_w": 179.95,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "c73f8db26be93b1be34f8caeb76ace268c01303bc0bcf3dcf8822797dc2aa382",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20063.0,
+          "prompt_tps": 1633.26,
+          "decode_ms": 2603.9,
+          "generated": 128,
+          "draft_accepted": 87,
+          "draft_offered": 93,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 45.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.41,
+              "max_power_w": 156.85,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 51.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 57.18,
+              "max_power_w": 197.15,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "f3f9932e41520021781210d5c57ed73dd822f8596b9ad99a2deb9ad4378f01ec",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20039.4,
+          "prompt_tps": 1635.18,
+          "decode_ms": 2872.1,
+          "generated": 128,
+          "draft_accepted": 75,
+          "draft_offered": 93,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.68,
+              "max_power_w": 220.22,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.45,
+              "max_power_w": 197.45,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "6d7d72fde8d0f2ffe80b5e8e8e0b4a34c922673961040e0abaaaf57a9cec5782",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20066.6,
+          "prompt_tps": 1632.96,
+          "decode_ms": 2774.3,
+          "generated": 128,
+          "draft_accepted": 81,
+          "draft_offered": 90,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.45,
+              "max_power_w": 203.26,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.45,
+              "max_power_w": 211.83,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "0f29bc219f76e0272bc96dd77b70948206c535877ebf9b270319dc1122e1d5f8",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "ring-default-confirm",
+      "ring_slots": 384,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2341,
+        2071
+      ],
+      "env_overrides": [],
+      "extra_args": [],
+      "startup_wall_s": 42.1,
+      "medians": {
+        "4096": {
+          "prefill_tps": 676.62,
+          "decode_tps": 55.657
+        },
+        "32768": {
+          "prefill_tps": 1630.18,
+          "decode_tps": 52.4633
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6088.6,
+          "prompt_tps": 672.73,
+          "decode_ms": 3171.3,
+          "generated": 128,
+          "draft_accepted": 79,
+          "draft_offered": 86,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 45.0,
+              "mean_temp_c": 43.88,
+              "max_power_w": 195.23,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 49.0,
+              "max_temp_c": 54.0,
+              "mean_temp_c": 51.75,
+              "max_power_w": 172.83,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "224950d1fa19964016d737caaf2db24a74582353beb15dfbc428ce4a2268ea72",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6053.6,
+          "prompt_tps": 676.62,
+          "decode_ms": 2299.8,
+          "generated": 128,
+          "draft_accepted": 85,
+          "draft_offered": 90,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 45.0,
+              "mean_temp_c": 43.88,
+              "max_power_w": 68.1,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 50.0,
+              "max_temp_c": 54.0,
+              "mean_temp_c": 51.75,
+              "max_power_w": 167.86,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "b0795fe3844b35b102fb0d46fc6ee9fef7c9540615ca1bdf2490aa961e4c04da",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 6045.1,
+          "prompt_tps": 677.57,
+          "decode_ms": 2284.1,
+          "generated": 128,
+          "draft_accepted": 69,
+          "draft_offered": 71,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 43.0,
+              "max_temp_c": 45.0,
+              "mean_temp_c": 44.0,
+              "max_power_w": 69.02,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 50.0,
+              "max_temp_c": 54.0,
+              "mean_temp_c": 52.12,
+              "max_power_w": 179.06,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "11e50d787fc4fa031fc6f13de659438da7e07ca2fbe09b4c42e125bff0c60e08",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20067.8,
+          "prompt_tps": 1632.86,
+          "decode_ms": 2519.4,
+          "generated": 128,
+          "draft_accepted": 83,
+          "draft_offered": 100,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 45.0,
+              "max_temp_c": 48.0,
+              "mean_temp_c": 46.24,
+              "max_power_w": 208.24,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 50.0,
+              "max_temp_c": 59.0,
+              "mean_temp_c": 55.76,
+              "max_power_w": 168.27,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "831722b595d8c9cceff2560a13a9a877e2584b8e0aa3bc04d7cd480e5f768252",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20100.8,
+          "prompt_tps": 1630.18,
+          "decode_ms": 2439.8,
+          "generated": 128,
+          "draft_accepted": 74,
+          "draft_offered": 78,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.33,
+              "max_power_w": 180.53,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 53.0,
+              "max_temp_c": 62.0,
+              "mean_temp_c": 58.62,
+              "max_power_w": 208.27,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "f259e14a9b62094410a01ad5028e22944265a9da9abdaeebb212b4d178864d58",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20127.7,
+          "prompt_tps": 1628.01,
+          "decode_ms": 2415.0,
+          "generated": 128,
+          "draft_accepted": 81,
+          "draft_offered": 90,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.67,
+              "max_power_w": 211.02,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.48,
+              "max_power_w": 211.54,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "a3b521922ff5f4a181af1a584a295b25dc6e5f8e51abd9bbf404f2abe0a1c252",
+          "first_output_id": 16
+        }
+      ]
+    },
+    {
+      "label": "ring-192-confirm",
+      "ring_slots": 192,
+      "chunk_tokens": 8192,
+      "borrowed_expert_slots": [
+        2072,
+        1833
+      ],
+      "env_overrides": [
+        "STRATA_SPLIT_RING=192"
+      ],
+      "extra_args": [],
+      "startup_wall_s": 42.5,
+      "medians": {
+        "4096": {
+          "prefill_tps": 713.08,
+          "decode_tps": 50.9351
+        },
+        "32768": {
+          "prefill_tps": 1633.55,
+          "decode_tps": 49.9376
+        }
+      },
+      "rows": [
+        {
+          "target": 4096,
+          "repeat": 1,
+          "prompt_sha256": "c697b41b230f03b9347dcbb7dfd7f440e9bd7bcd855537bcf52152852495305e",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5798.5,
+          "prompt_tps": 706.39,
+          "decode_ms": 3046.0,
+          "generated": 128,
+          "draft_accepted": 88,
+          "draft_offered": 94,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.62,
+              "max_power_w": 73.55,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 54.12,
+              "max_power_w": 164.13,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "29f59f578749989e9abfda08784dbdc78f0e05d544d0a7d1744fcf173f0e0129",
+          "first_output_id": 10067
+        },
+        {
+          "target": 4096,
+          "repeat": 2,
+          "prompt_sha256": "1576d02061a040b848d31a5d20cc57110edeed56171f7c24be97c64194e6da78",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5733.9,
+          "prompt_tps": 714.35,
+          "decode_ms": 2513.0,
+          "generated": 128,
+          "draft_accepted": 75,
+          "draft_offered": 76,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 8,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.75,
+              "max_power_w": 146.76,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            },
+            "1": {
+              "samples": 8,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 53.88,
+              "max_power_w": 202.38,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000000"
+            }
+          },
+          "output_sha256": "c282ace0a7f3f597d794972780fc71164af26e372bf556b7cf91ba1e28d29e04",
+          "first_output_id": 15
+        },
+        {
+          "target": 4096,
+          "repeat": 3,
+          "prompt_sha256": "379a53a4cd7f142cf31ebae5dd1cc1631b298bf604d8c588903f5f36117631ef",
+          "prompt_tokens": 4096,
+          "prompt_ms": 5744.1,
+          "prompt_tps": 713.08,
+          "decode_ms": 2257.1,
+          "generated": 128,
+          "draft_accepted": 82,
+          "draft_offered": 94,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 7,
+              "min_temp_c": 44.0,
+              "max_temp_c": 46.0,
+              "mean_temp_c": 44.71,
+              "max_power_w": 84.89,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 7,
+              "min_temp_c": 52.0,
+              "max_temp_c": 56.0,
+              "mean_temp_c": 54.14,
+              "max_power_w": 182.88,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "ed9e3e2271fdbdd1421ad8a0d2e8dda84f9479ed1383ae2de18764d8baa75cf9",
+          "first_output_id": 927
+        },
+        {
+          "target": 32768,
+          "repeat": 1,
+          "prompt_sha256": "29ad7dac723f5d939a2628103fa3defe8d0a8c7cc648ac3d664b36ab391aa489",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20059.4,
+          "prompt_tps": 1633.55,
+          "decode_ms": 2688.9,
+          "generated": 128,
+          "draft_accepted": 72,
+          "draft_offered": 85,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 45.0,
+              "max_temp_c": 49.0,
+              "mean_temp_c": 46.86,
+              "max_power_w": 218.38,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 51.0,
+              "max_temp_c": 60.0,
+              "mean_temp_c": 57.23,
+              "max_power_w": 219.38,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "c2ec1ca965f753c396585f0667db8969bcb88e485d15f2f64813541a2d521949",
+          "first_output_id": 478
+        },
+        {
+          "target": 32768,
+          "repeat": 2,
+          "prompt_sha256": "19109a9e6ab11d422baf3782202d7cd3878fa2ef09722949408934a8a1901d6b",
+          "prompt_tokens": 32768,
+          "prompt_ms": 19885.1,
+          "prompt_tps": 1647.87,
+          "decode_ms": 2563.2,
+          "generated": 128,
+          "draft_accepted": 68,
+          "draft_offered": 80,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 22,
+              "min_temp_c": 46.0,
+              "max_temp_c": 50.0,
+              "mean_temp_c": 47.64,
+              "max_power_w": 163.48,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 22,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.5,
+              "max_power_w": 203.72,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "eee6b5a6741b69de795e03aab8f216b774bd17703e7c3845e479825bdef13fbb",
+          "first_output_id": 10067
+        },
+        {
+          "target": 32768,
+          "repeat": 3,
+          "prompt_sha256": "886254e9a0a52cfd3b762085f461739d18f2c3d96dbc880b605162cad17b6ba9",
+          "prompt_tokens": 32768,
+          "prompt_ms": 20154.2,
+          "prompt_tps": 1625.86,
+          "decode_ms": 2502.8,
+          "generated": 128,
+          "draft_accepted": 70,
+          "draft_offered": 81,
+          "reused": 0,
+          "gpu_stats": {
+            "0": {
+              "samples": 21,
+              "min_temp_c": 46.0,
+              "max_temp_c": 51.0,
+              "mean_temp_c": 47.81,
+              "max_power_w": 224.69,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            },
+            "1": {
+              "samples": 21,
+              "min_temp_c": 54.0,
+              "max_temp_c": 63.0,
+              "mean_temp_c": 59.52,
+              "max_power_w": 180.02,
+              "max_sm_mhz": 1380.0,
+              "thermal_slowdown_samples": 0,
+              "max_throttle_mask": "0x0000000000000004"
+            }
+          },
+          "output_sha256": "d176a803dfd1b9cd606be4ce2c7b474bac1a32a2574e67d4ec843d2088358001",
+          "first_output_id": 19
+        }
+      ]
+    }
+  ]
+}
