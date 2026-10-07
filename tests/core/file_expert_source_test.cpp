@@ -170,6 +170,20 @@ void test_canonical_layout() {
                 source.blob(layers, 0) == nullptr && source.blob(0, experts) == nullptr,
             "canonical bounds check accepted an invalid layer or expert");
     require(source.reads() == 3, "invalid canonical lookups changed the read count");
+    ArenaExpertSource arena;
+    require(arena.open(dir.path.string(), layers, experts, 1, err, BLOB), err);
+    const uint8_t* cpu_view = arena.pinned_blob(0, 0);
+    if (arena.pinned(0, 0)) {
+        require(cpu_view && cpu_view[0] == 'a', "arena CPU view read the wrong expert");
+        require(arena.pinned_blob(1, 0) == nullptr, "arena CPU view exposed an unpinned layer");
+        require(arena.reads() == 0, "arena CPU view changed read accounting");
+    } else {
+        require(cpu_view == nullptr, "arena CPU view exposed unpinned bytes");
+    }
+    require(arena.pinned_blob(-1, 0) == nullptr && arena.pinned_blob(layers, 0) == nullptr &&
+            arena.pinned_blob(0, experts) == nullptr, "arena CPU view accepted invalid geometry");
+    arena.close();
+    require(arena.pinned_blob(0, 0) == nullptr, "closed arena retained a CPU view");
 #if defined(_WIN32)
     check_mapped_release(source, 0, 0, BLOB);
     check_mapped_release(source, 0, 1, BLOB);
@@ -578,6 +592,14 @@ void test_rotating_source(bool rotate, bool pin) {
             require(held == ((rotate && pin) ? eviction[q] : prior[q]), "wrong storage selected");
             if (rotate && pin) require(src.exchange_buffer(q) == prior[q], "old input not recycled");
             require(src.copy_blob(0, outgoing[q], actual.data()) && actual == truth[outgoing[q]], "copy_blob mismatch");
+            const int64_t reads_before = src.reads();
+            const uint8_t* pinned = src.pinned_blob(0, outgoing[q]);
+            require(pin ? pinned == held : pinned == nullptr, "pinned CPU view selected the wrong storage");
+            require(src.pinned_blob(0, incoming[q]) == nullptr && src.pinned_blob(0, 4) == nullptr,
+                    "pinned CPU view exposed a GPU-only or file-tier expert");
+            require(src.pinned_blob(-1, outgoing[q]) == nullptr && src.pinned_blob(1, outgoing[q]) == nullptr &&
+                    src.pinned_blob(0, 5) == nullptr, "pinned CPU view accepted invalid geometry");
+            require(src.reads() == reads_before, "pinned CPU lookup changed read accounting");
             require(!src.transient(0, outgoing[q]), "resident became transient");
             if (pin) {
                 require(src.pinned(0, outgoing[q]) && src.device_alias(0, outgoing[q]), "mapping lost");
@@ -597,6 +619,7 @@ void test_rotating_source(bool rotate, bool pin) {
               << " exchanges=64 commit_ms=" << commit_ms << " exact_bytes=PASS\n";
     src.close();
     require(!src.exchange_rotation() && !src.exchange_buffer(0), "close retained storage");
+    require(src.pinned_blob(0, 0) == nullptr, "closed source retained a pinned CPU view");
     require(src.open(dir.path.string(), 1, 5, err), err);
     require(!src.has_resident(0, 0) && !src.exchange_rotation(), "reopen retained residency");
 }

@@ -6351,6 +6351,7 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < stages.size(); ++i) {
                 GpuStage& st = *stages[i];
                 st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
+                if (o.batch <= 0 && !o.no_pool) st.sp.set_cpu_pool(&pool);
                 const strata::core::OnDevice on(st.dev);
                 void* sb = nullptr;              // this stage's own loan, out of its own cache
                 uint64_t sbb = 0;
@@ -6366,8 +6367,9 @@ int main(int argc, char** argv) {
                 }
             }
             if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
-            // the pool is idle while a prompt is read unless batch slots decode between its parts
-            if (!multi_gpu && o.batch <= 0 && !o.no_pool) sp.set_cpu_pool(&pool);
+            // Prefill drains every stage before decode resumes. Native CPU batches serialize on the shared pool.
+            // Batch slots can decode between prompt parts, so they must not attach the pool.
+            if (o.batch <= 0 && !o.no_pool) sp.set_cpu_pool(&pool);
             if (!sp.init(wt, g, ss, srcp, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes))
                 return err.find("do not fit") != std::string::npos ? 2 : 1;
             return 0;

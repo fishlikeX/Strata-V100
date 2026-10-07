@@ -196,7 +196,8 @@ public:
     /// its tokens, fewest first, up to a share of the experts it would stream (`auto`: measured, where both sides end
     /// together). The CPU reads them from RAM while the rest come over PCIe; their rows go to Dm's tail, as a peer's
     /// do. Not bit-identical to the GPU's rows (the CPU's own activation format). Unset (default) or null: every
-    /// expert on the GPU. Only for a pool no other thread runs meanwhile (no batch slots). Set before `init`.
+    /// expert on the GPU. Stages can share one pool: native batches serialize, and run() drains
+    /// all stages before decode resumes. No batch slots or concurrent decode. Set before `init`.
     void set_cpu_pool(kernels::cpu::ExpertPool* pool);
 
 private:

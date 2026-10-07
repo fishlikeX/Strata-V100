@@ -95,6 +95,11 @@ Additional runtime checks:
 
 ## Service policy
 
+This section records the original release integration. The later
+[multi-GPU CPU-prefill change](../benchmarks/v100-multi-gpu-cpu-prefill-2026-10-07.md)
+adds serialized pool ownership and immutable source views. It supersedes the
+single-GPU limit and completes integration step 2 below. Batch slots stay excluded.
+
 
 Keep the current two-GPU service split and cache settings. Do not enable CPU
 prefill sharing for that service: the upstream attachment condition excludes

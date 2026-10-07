@@ -139,6 +139,13 @@ public:
     /// asynchronous host-to-device copy can DMA it directly (no staging copy on the CPU).
     virtual bool pinned(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return false; }
 
+    /// Read-only pinned RAM blob, valid until source ownership changes or the source closes.
+    /// Safe for concurrent prefill stages. No counters, staging, or file reads are changed.
+    /// Ownership changes must wait for prefill to drain. Unsupported sources return null.
+    virtual const uint8_t* pinned_blob(int64_t layer, int64_t expert) const {
+        (void) layer; (void) expert; return nullptr;
+    }
+
     /// Called once before the first expert of a layer.  A source that reads from disk wants to start the read
     /// here so it overlaps the quantisation, and a prefetching source in Phase 3 wants the ids.
     virtual void begin_layer(int64_t layer, const int32_t* ids, int64_t k) { (void) layer; (void) ids; (void) k; }
@@ -564,6 +571,7 @@ public:
     /// VRAM. Never touches the resident complement or staging buffers. Disabled by default.
     uint64_t release(int64_t layer, int64_t expert) override;
     bool pinned(int64_t layer, int64_t expert) const override;
+    const uint8_t* pinned_blob(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     bool pcie_layer(int64_t layer) const override;
     bool transient(int64_t layer, int64_t expert) const override;
@@ -722,6 +730,7 @@ public:
     const uint8_t* blob(int64_t layer, int64_t expert) override;
     int64_t reads() const { return reads_; }
     bool pinned(int64_t layer, int64_t expert) const override;
+    const uint8_t* pinned_blob(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     void prefetch(int64_t layer, int64_t expert) override;
     uint64_t release(int64_t layer, int64_t expert) override;

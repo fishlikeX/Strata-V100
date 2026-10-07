@@ -2263,6 +2263,10 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
            complement_offsets_[index] + layer_blob_bytes_[(size_t) layer] <= complement_pin_limit_;
 }
 
+const uint8_t* FileExpertSource::pinned_blob(int64_t layer, int64_t expert) const {
+    return pinned(layer, expert) ? resident_blob(layer, expert) : nullptr;
+}
+
 const uint8_t* FileExpertSource::device_alias(int64_t layer, int64_t expert) const {
     if (!pinned(layer, expert) || complement_device_ == nullptr) return nullptr;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
@@ -3463,6 +3467,12 @@ bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {
     if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return false;
     const auto& lay = strata::kernels::cpu::expert_layout();
     return lay.blob_offset(layer, expert) + lay.blob_bytes(layer) <= pinned_bytes_;
+}
+
+const uint8_t* ArenaExpertSource::pinned_blob(int64_t layer, int64_t expert) const {
+    if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_ ||
+        layer >= blobs_ / n_expert_ || !pinned(layer, expert)) return nullptr;
+    return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
 }
 
 const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) const {

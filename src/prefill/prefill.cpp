@@ -2897,7 +2897,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (c == 0 || (m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0))
                                     continue;
                                 ++nstream;
-                                if (c <= strata::kernels::cpu::MAXT && m.src->pinned(l, e) && !m.src->transient(l, e))
+                                if (c <= strata::kernels::cpu::MAXT && m.src->pinned_blob(l, e) != nullptr)
                                     cand.emplace_back(c, e);
                             }
                             std::sort(cand.begin(), cand.end());
@@ -3012,11 +3012,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (m.cpu_ev[0] == nullptr) { cudaEventCreate(&m.cpu_ev[0]); cudaEventCreate(&m.cpu_ev[1]); }
                                 cudaEventRecord(m.cpu_ev[0], m.cs);
                             }
-                            // Capture the pinned, non-transient RAM blobs on this thread. The worker makes
-                            // no ExpertSource calls, so it cannot race with the GPU stager's source access.
+                            // Capture immutable pinned RAM pointers without source counters or staging changes.
+                            // Both the source lookup and the CPU worker are safe across overlapping stages.
                             cpu_blob.assign((size_t) m.g->n_expert, nullptr);
                             for (int32_t e = 0; e < m.g->n_expert; ++e)
-                                if (on_cpu[(size_t) e] && (cpu_blob[(size_t) e] = m.src->blob(l, e)) == nullptr) {
+                                if (on_cpu[(size_t) e] && (cpu_blob[(size_t) e] = m.src->pinned_blob(l, e)) == nullptr) {
                                     err = "prefill: a CPU expert has no blob";
                                     return false;
                                 }
@@ -3859,8 +3859,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::snprintf(b, sizeof b, " %s %.0f (%.1f%%)", kPfNames[i], pt.ms[i], total > 0 ? 100.0 * pt.ms[i] / total : 0.0);
             line += b;
         }
-        std::fprintf(stderr, "strata prefill timing: %lld tokens, GPU timeline %.0f ms, wall %.0f ms, host staging %.0f ms:%s\n",
-                     (long long) n, total, ms_since(t_start), stats_.ms_experts_host, line.c_str());
+        std::fprintf(stderr, "strata prefill timing: CUDA%d layers [%lld,%lld), %lld tokens, GPU timeline %.0f ms, "
+                             "wall %.0f ms, host staging %.0f ms, cumulative CPU experts %lld (share %.2f):%s\n",
+                     m.device, (long long) stage_lb_, (long long) (stage_le_ < 0 ? m.g->n_layers : stage_le_),
+                     (long long) n, total, ms_since(t_start), stats_.ms_experts_host,
+                     (long long) stats_.experts_cpu, stats_.cpu_share, line.c_str());
         std::fprintf(stderr, "strata prefill timing: host: chunk setup (PLE rows, the expert stream plan) %.0f ms, "
                              "waiting for each chunk %.0f ms, after each chunk (the draft layer, progress) %.0f ms, "
                              "PLE %.0f ms\n", host_setup_ms, host_sync_ms, host_chunk_ms, stats_.ms_ple);
