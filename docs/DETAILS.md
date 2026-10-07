@@ -925,6 +925,11 @@ print(r.choices[0].message.content)
   part of the thinking the client sees and counts as output tokens. `"reasoning_budget_tokens": N` in
   `strata-<model>.json` sets it for every request; a request's own value wins, and `0` means no budget. Off by default;
   Anthropic's `"thinking": {"budget_tokens": N}` still only chooses the level, as above.
+- **Past thinking is not part of the next prompt by default.** The server removes
+  historical `reasoning_content`, including in tool-call history. It still generates
+  and streams thinking for the current reply. To include supplied historical
+  reasoning, set `"chat_template_kwargs": {"preserve_thinking": true}`. This is an
+  explicit request option, not the default.
 - **A reply stuck on one token is ended (0.1.39, #606).** When a reply repeats the same token 256 times in a row, the
   server ends it there with `finish_reason` `"length"` and says so in its window: a model in a loop, or a broken
   state that answers one token forever (#606 saw 36,689 tokens of `!`). `"repeat_stop_tokens": N` in
@@ -1047,6 +1052,31 @@ reading after it instead of from token 0. A prompt read from the start is also c
 prompt when that is 2,048 tokens or more (engine 0.1.20; PR #62 + #65), so that root exists for agent clients with long
 system prompts and tool lists. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
 `--prompt-cache-root N` (0 = no system-prompt checkpoint), `--turn-token ID`.
+
+**Answer-only history in GPU memory.** A client can omit the previous reply's
+thinking. The generated GPU state then differs from the next prompt. That state
+cannot be reused as if the thinking were absent.
+
+After a complete reply, a serial server prepares the exact answer-only history
+with a decode-free idle prefill. It includes completed tool calls and the original
+image embeddings. It does not store hidden thinking in the next prompt or generate
+an extra token. A following request reuses the prepared prefix only if its tokens,
+images, and control-vector mode match.
+
+A foreground request cancels idle prefill before it waits for the engine. The
+engine stops at a safe prompt-read boundary and drains the command before it
+accepts the request. Idle prefill does not replace request metrics. It does not
+load an unloaded model, and it is not used with parallel batch slots.
+
+The rebuild still uses GPU time. If the next request arrives before it completes,
+or changes the history or prompt settings, some prompt processing remains on the
+request path. The last session stays in GPU memory; L2 and L3 parking is for a
+conflicting session, not for every completed turn.
+
+The engine reports `INFO prefill_only=1` when it supports this path.
+`GEN 0 <ids>` and `GENI 0 <embeddings> <ids>` process all but the final prompt
+token, emit no generated tokens, and return `DONE` with a generated count of zero.
+The deferred token is processed by the next generation request.
 
 **Multiple conversations (opt-in).** Add `--conversation-cache-mib 8192
 --conversation-cache-slots 4` to the engine arguments to park up to four conversations

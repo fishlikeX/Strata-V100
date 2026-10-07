@@ -52,7 +52,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            images_of, mark_think_literals, openai_to_messages, unmark_think_literals)
+                            images_of, mark_think_literals, openai_to_messages, strip_reasoning,
+                            unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
@@ -92,6 +93,9 @@ ENGINE_SILENCE_S = 300.0
 PP_CHUNK_MAX = 32768
 PP_FLOOR_TOK_S = 50.0
 PP_SLACK = 3.0
+# The idle prefill is the only engine read a foreground request must be able to interrupt: it looks for a cancel this
+# often, so a STOP follows within ~0.1 s instead of waiting for a queue.get() timeout (a whole heartbeat).
+PREFILL_POLL_S = 0.1
 
 
 # ------------------------------------------------------------------------------------------------ engines
@@ -529,6 +533,25 @@ def btrace(*a):
 EOS_IDS = {248044, 248046}   # <|endoftext|>, <|im_end|>: the engine's default --eos-ids
 
 
+def done_fields(line) -> dict:
+    """A `DONE` line's fields as a dict, without recording them (the idle prefill reads its own DONE; `_parse_done`
+    uses this and keeps it as the engine's `last`)."""
+    f = line.split()
+    out = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
+           "decode_ms": float(f[4]), "finish": f[5]}
+    if len(f) >= 9:                                   # the conversation cache's fields (engine 0.1.3+)
+        out.update(drafts_accepted=int(f[6]), drafts_offered=int(f[7]), reused=int(f[8]))
+    if len(f) >= 11:                                  # decode hit rate fields
+        out.update(hits=int(f[9]), lookups=int(f[10]))
+    if len(f) >= 14:                                  # the expert tiers (engine 0.1.31+): RAM / file blobs, file MB
+        out.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
+    if len(f) >= 15:                                  # #471 (engine 0.1.36+): the prompt tokens actually read
+        out.update(prompt_read=int(f[14]))
+    if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
+        out.update(offloaded=int(f[15]))
+    return out
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -569,6 +592,7 @@ class StrataEngine:
         self.ended, self.unloaded = True, True
         self.max_context = int(args[args.index("--max-context") + 1]) if "--max-context" in args else 4096
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
+        self.prefill_only = False        # the engine takes a decode-free prefill (GEN 0; INFO prefill_only=1)
         self.last = {}
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
         self.prefill_tok_s_mean = None
@@ -616,6 +640,7 @@ class StrataEngine:
                 f = line.split()
                 self.max_context = int(f[1])
                 self.can_stop = "stop" in f[2:]
+                self.prefill_only = bool(self.info.get("prefill_only"))
                 break
         loading.set()
         if self.max_context <= 0:
@@ -758,19 +783,7 @@ class StrataEngine:
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
-        f = line.split()
-        self.last = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
-                     "decode_ms": float(f[4]), "finish": f[5]}
-        if len(f) >= 9:                                   # the conversation cache's fields (engine 0.1.3+)
-            self.last.update(drafts_accepted=int(f[6]), drafts_offered=int(f[7]), reused=int(f[8]))
-        if len(f) >= 11:                                  # decode hit rate fields
-            self.last.update(hits=int(f[9]), lookups=int(f[10]))
-        if len(f) >= 14:                                  # the expert tiers (engine 0.1.31+): RAM / file blobs, file MB
-            self.last.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
-        if len(f) >= 15:                                  # #471 (engine 0.1.36+): the prompt tokens actually read
-            self.last.update(prompt_read=int(f[14]))
-        if len(f) >= 16:                                  # #588 (engine 0.1.39+): routed experts read over PCIe
-            self.last.update(offloaded=int(f[15]))
+        self.last = done_fields(line)
 
     def vram(self, reserve_mib: int | list | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
@@ -927,9 +940,10 @@ class StrataEngine:
                 self._ctl_result = ("done", None)
                 return
 
-    def _drain_control(self, until: str, timeout: float = 300.0):
+    def _drain_control(self, until: str, timeout: float = 300.0, parse: bool = True):
         """After a consumer left early: read the control lines up to the next `until` line (DONE or BADM) so the next
-        request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered)."""
+        request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered).
+        `parse` False leaves `last` alone (the idle prefill's own drain: its DONE is not a request's figures)."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             try:
@@ -938,7 +952,7 @@ class StrataEngine:
                 break
             if line is None:
                 return None
-            if line.startswith("DONE"):
+            if line.startswith("DONE") and parse:
                 self._parse_done(line)
             if line.startswith(until) or line.startswith("ERR"):
                 return line
@@ -1373,6 +1387,73 @@ class StrataEngine:
                         break
                     if not self.can_stop:
                         heard = time.monotonic()
+
+    def prefill(self, ids, sampling, cancel, embeddings=None):
+        """Decode-free: `GEN 0` reads the prompt into the session and stops - no `T`, one DONE with 0 generated - so
+        the request that follows reuses it.  The caller holds the service's FIFO and no request is running; the
+        service's idle-prefill worker is the only caller.  Never touches `last` or `progress`: this is not a request,
+        so its DONE is parsed locally and returned.  A cancel STOPs the read and drains to its DONE, leaving the
+        shared queue clean for the next request."""
+        if not self.prefill_only or len(ids) < 2 or not self.alive():
+            return None
+        head = f"GENI 0{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
+            f"GEN 0{self.sampling_keys(sampling or {})}"
+        try:
+            self.proc.stdin.write(f"{head} {','.join(str(int(t)) for t in ids)}\n")
+            self.proc.stdin.flush()
+        except OSError:                                  # the pipe is gone: the engine died (not the client)
+            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
+        done = False
+        # #481: an engine that goes quiet is ended here too, and the cancel is looked for every PREFILL_POLL_S - not
+        # once per queue.get() timeout - so a foreground request's STOP follows within ~0.1 s, even while PP lines keep
+        # arriving (the loop used to keep reading them and never look at the cancel until the engine fell silent).
+        silence = float(self.silence_s or 0)
+        allow = silence + min(len(ids), PP_CHUNK_MAX) / PP_FLOOR_TOK_S if silence > 0 else 0.0
+        heard, read_to = time.monotonic(), 0
+        try:
+            while True:
+                if cancel.is_set():
+                    break
+                wait = PREFILL_POLL_S
+                if allow > 0:
+                    wait = min(wait, max(0.0, allow - (time.monotonic() - heard)))
+                    if wait <= 0:
+                        done = True
+                        raise self._silent(f"the engine said nothing for {time.monotonic() - heard:.0f} s during "
+                                           "the idle prefill")
+                try:
+                    line = self.lines.get(timeout=wait)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    done = True
+                    raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
+                heard = time.monotonic()
+                if line.startswith("PP "):               # prompt progress: reset the silence allowance, then look again
+                    f = line.split()
+                    if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
+                        rate, chunk = (float(f[4]) if len(f) >= 5 else 0.0), int(f[1]) - read_to
+                        read_to = int(f[1])
+                        if silence > 0 and rate > 0 and chunk > 0:
+                            allow = max(silence, PP_SLACK * chunk / rate)
+                    continue
+                if line.startswith("DONE"):
+                    done = True
+                    return done_fields(line)
+                if line.startswith("ERR"):
+                    done = True
+                    raise ValueError(line[4:].strip())
+        finally:
+            if not done:                                 # cancelled (or it died): STOP and drain to our own DONE
+                if self.can_stop:
+                    try:
+                        self.proc.stdin.write("STOP\n")
+                        self.proc.stdin.flush()
+                    except OSError:
+                        pass
+                drained = self._drain_control("DONE", timeout=allow if allow > 0 else 300.0, parse=False)
+                if drained is None:
+                    raise self._silent("the engine did not finish the idle prefill after STOP")
 
     def _silent(self, what: str) -> EngineSilent:
         """#481: end an engine that lost step with the server (its main thread waits for a command the server never
@@ -1861,6 +1942,18 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.fifo = threading.Lock()
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
+        self.req_ctx = threading.local()              # what this request's prepare() saw, for the idle prefill's job
+        # The idle prefill: after a reply a client will send back without its thinking, one worker reads the canonical
+        # next-turn prefix into the engine (GEN 0) while nothing else is running, so the next request reuses it
+        # instead of reading it.  Serial engines only - with --batch the engine's own slots hold the conversations.
+        self._warm_cv = threading.Condition()
+        self._warm_job = None                         # the newest job; None: nothing to do
+        self._warm_cancel = threading.Event()         # set by a foreground request: a running prefill stops
+        self._warm_idle = threading.Event()           # set while there is nothing left to prefill (see wait_warm)
+        self._warm_idle.set()
+        self._warm_active = False                     # the worker is inside engine.prefill()
+        self._warm_thread = None
+        self._warm_stop = False
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
         # turn before the answer instead of the top of the prompt, so switching it keeps the cached conversation
@@ -2028,8 +2121,10 @@ class Service:
         -> {"status": ..., and the engine's figures}."""
         if not hasattr(self.engine, "vram"):
             raise ValueError("this engine cannot resize its VRAM use")
+        self.cancel_warm()                 # the idle prefill gives way (it may hold the FIFO)
         if not self.fifo.acquire(timeout=self.vram_wait_s):
             raise ModelBusy("a request is still running; try again when it has finished")
+        self._warm_cancel.clear()          # this change holds the FIFO now: no prefill is running
         # parallel requests do not hold the fifo: the engine's control lines (a prompt being admitted) are taken too,
         # and the engine refuses a resize while a slot decodes
         ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None
@@ -2060,6 +2155,7 @@ class Service:
 
     def load(self):
         """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
+        self.cancel_warm()                 # a request is on its way: the idle prefill gives way before we wait
         # a request is on its way: the idle thread must not unload between this and the request's own start
         self.last_request_at = time.time()
         if self.loaded() and not self._vision_need_start():
@@ -2067,6 +2163,7 @@ class Service:
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
         with self.fifo:
+            self._warm_cancel.clear()      # this request holds the FIFO now: no prefill is running
             loading = time.perf_counter()
             if trace is not None:
                 with self.status_lock:
@@ -2085,8 +2182,10 @@ class Service:
         with idle_for: one ran more recently than that) or "unsupported"."""
         if not hasattr(self.engine, "unload"):
             return "unsupported"
+        self.cancel_warm()                 # the idle prefill gives way (it may hold the FIFO)
         if not self.fifo.acquire(blocking=False):
             return "busy"
+        self._warm_cancel.clear()          # this unload holds the FIFO now: no prefill is running
         try:
             if not self.engine.alive():
                 return "not loaded"
@@ -2413,11 +2512,23 @@ class Service:
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
+    def _history(self, messages, kwargs):
+        """The template's messages and kwargs for a render: historical thinking is left out unless the request asks
+        for it back (`preserve_thinking` true - the Responses API, which replays what it was given).  The caller's own
+        messages are never changed (a copy only of the assistant turns that carried thinking)."""
+        kwargs = dict(kwargs)
+        if kwargs.get("preserve_thinking") is not True:
+            kwargs["preserve_thinking"] = False
+            messages = strip_reasoning(messages)
+        return messages, kwargs
+
     def render_prompt(self, messages, tools, kwargs) -> str:
-        """The template rendered.  #458: with `effort_end`, a request with a non-default effort (low, medium or no
-        thinking) is rendered as a default one up to the answer - the same prompt start, so the conversation cache
-        keeps it - and its effort follows in a short system turn right before the answer (thinking off: the template's
-        empty thinking block).  The engine (--tail-role-token) checkpoints in front of that turn."""
+        """The template rendered.  Historical thinking is left out by default (see `_history`).  #458: with
+        `effort_end`, a request with a non-default effort (low, medium or no thinking) is rendered as a default one
+        up to the answer - the same prompt start, so the conversation cache keeps it - and its effort follows in a
+        short system turn right before the answer (thinking off: the template's empty thinking block).  The engine
+        (--tail-role-token) checkpoints in front of that turn."""
+        messages, kwargs = self._history(messages, kwargs)
         effort = kwargs.get("reasoning_effort")
         off = kwargs.get("enable_thinking") is False
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
@@ -2431,52 +2542,74 @@ class Service:
         tail = "" if off else EFFORT_TURN.format(EFFORT_TEXT.get(effort, EFFORT_TEXT["medium"]))
         return history + tail + full[len(mine):]
 
+    def render_history(self, messages, tools, kwargs) -> str:
+        """The prompt up to the end of the last turn: no generation tail, and with "effort_position": "end" no
+        trailing effort turn either - both belong to the next request, not to this history.  Historical thinking is
+        left out as render_prompt does, so this is what the next request's prompt starts with."""
+        messages, kwargs = self._history(messages, kwargs)
+        if self.effort_end:
+            kwargs = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
+        return self.template.render(messages, tools=tools, add_generation_prompt=False, **kwargs)
+
     def encode_prompt(self, messages, tools, kwargs) -> list[int]:
-        """The request's prompt: the template rendered and tokenized.  #537: a <think> / </think> written inside a
+        """The request's prompt: the template rendered and tokenized.  #537: a  thinking / </think> written inside a
         message's text is encoded as the text it is, not as the model's reasoning markers (the template's own are)."""
         marked, marked_tools, changed = mark_think_literals(messages, tools)
         prompt = self.render_prompt(marked, marked_tools, kwargs)
+        return self._encode_rendered(prompt, changed)
+
+    def _encode_rendered(self, prompt: str, changed: bool) -> list[int]:
+        """A rendered prompt tokenized, with #537's literal tags encoded as the text they are when there were any."""
         if not changed:
             return self.tok.encode(prompt, parse_special=True)
         prompt, plain = unmark_think_literals(prompt)
         return self.tok.encode(prompt, parse_special=True, plain=plain)
 
+    def _expand_images(self, ids, counts) -> list[int]:
+        """One <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
+        (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs, #150)
+        is kept as plain text, or it took an image's place and the counts no longer matched."""
+        pad = self.tok.encode(IMAGE_PAD, parse_special=True)[0]
+        start = self.tok.encode(VISION_START, parse_special=True)[0]
+        literal = self.tok.encode(IMAGE_PAD, parse_special=False)
+        out, k = [], 0
+        for j, t in enumerate(ids):
+            if t == pad and j > 0 and ids[j - 1] == start and k < len(counts):
+                out += [pad] * counts[k]
+                k += 1
+            elif t == pad:
+                out += literal
+            else:
+                out.append(t)
+        if k != len(counts):
+            raise ValueError("the prompt and its images do not match")
+        return out
+
     def prepare(self, messages, tools, kwargs, max_new=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
-        the rest of the context."""
+        the rest of the context.  The prompt, its tools and kwargs are kept for the request (a thread-local the idle
+        prefill reads), so a reply's canonical next-turn prefix can be rendered once the answer is known."""
+        self.cancel_warm()                 # a request is on its way: the idle prefill gives way (it may hold the FIFO)
+        self.req_ctx.pending = None
         ids = self.encode_prompt(messages, tools, kwargs)
         self.embeddings.path = None
+        image_counts = None
         images = images_of(messages)
         if images:
             if self.vision is None:
                 raise ValueError("this server was started without the vision encoder (run setup again and choose "
                                  "'vision'), so it cannot read images")
-            pad = self.tok.encode(IMAGE_PAD, parse_special=True)[0]
-            start = self.tok.encode(VISION_START, parse_special=True)[0]
             # Encode only while the engine is idle: the engine and the image encoder (a separate process) must not
             # run on the GPU at the same time - an encode during a running request left that request stuck at
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
             with self.fifo:
-                self._ensure_vision()                     # lazy: hand the GPUs' VRAM back and start it, engine idle
+                self._warm_cancel.clear()                # this request holds the FIFO now: no prefill is running
+                self._ensure_vision()                    # lazy: hand the GPUs' VRAM back and start it, engine idle
                 encoded = [self.vision.encode(src) for src in images]
-                self.last_image_at = time.time()          # under the FIFO: the idle unload re-checks before acting
-            # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
-            # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
-            # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
-            literal = self.tok.encode(IMAGE_PAD, parse_special=False)
-            out, k = [], 0
-            for j, t in enumerate(ids):
-                if t == pad and j > 0 and ids[j - 1] == start and k < len(encoded):
-                    out += [pad] * encoded[k][1]
-                    k += 1
-                elif t == pad:
-                    out += literal
-                else:
-                    out.append(t)
-            if k != len(encoded):
-                raise ValueError("the prompt and its images do not match")
-            ids = out
+                self.last_image_at = time.time()         # under the FIFO: the idle unload re-checks before acting
+            image_counts = [n for _, n in encoded]
+            ids = self._expand_images(ids, image_counts)
             combined = self.vision.dir / f"req-{uuid.uuid4().hex[:12]}.sve"
             with open(combined, "wb") as f:
                 for path, _ in encoded:
@@ -2504,6 +2637,8 @@ class Service:
                                  f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
                                  "model's strata-<model>.json to shorten it to the room left (#545)")
             max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
+        self.req_ctx.pending = {"messages": messages, "tools": tools, "kwargs": dict(kwargs),
+                                "image_counts": image_counts}
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
     def _note(self, n, evs, st=None, rate=None):
@@ -2542,8 +2677,180 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
+    # ------------------------------------------------------------------ idle prefill (the next request's prefix)
+    def cancel_warm(self):
+        """A foreground request (or an unload/VRAM change) is on its way: the idle prefill must not hold the FIFO,
+        and one already reading is stopped.  Called before taking the FIFO, so the prefill gives way first."""
+        self._warm_cancel.set()
+        with self._warm_cv:
+            job, self._warm_job = self._warm_job, None
+            self._warm_cv.notify_all()
+        self._warm_drop(job)
+        self._warm_settle()
+
+    def _warm_settle(self):
+        """The worker has nothing left to do: let wait_warm (a smoke test's hook) return."""
+        with self._warm_cv:
+            if self._warm_job is None and not self._warm_active:
+                self._warm_idle.set()
+
+    def wait_warm(self, timeout: float | None = None) -> bool:
+        """Wait until the idle prefill has nothing left to do -> True (False: the timeout).  It never exposes the
+        prompt: a smoke test uses it to know the next turn's prefix has been read (or given up on)."""
+        return self._warm_idle.wait(timeout)
+
+    @staticmethod
+    def _warm_drop(job):
+        """A job that will not run: its image embeddings file goes (a job the worker took is dropped by its own
+        finally)."""
+        if job and job.get("unlink"):
+            Path(job["unlink"]).unlink(missing_ok=True)
+
+    def schedule_warm(self, ids, sampling, embeddings=None, unlink=None):
+        """Hand the idle prefill worker the canonical next-turn prefix (the tokens the next request will start with).
+        The caller holds the FIFO (it is the request that just finished).  Serial engines only: with --batch the
+        engine's own slots hold the conversations, and the worker is skipped."""
+        if getattr(self.engine, "batch", 0) or not getattr(self.engine, "prefill_only", False) or len(ids) < 2:
+            self._warm_drop({"unlink": unlink})
+            return False
+        if self._warm_cancel.is_set():                  # a request is already waiting: it goes first
+            self._warm_drop({"unlink": unlink})
+            return False
+        job = {"ids": list(ids), "sampling": dict(sampling or {}), "embeddings": embeddings, "unlink": unlink}
+        with self._warm_cv:
+            old, self._warm_job = self._warm_job, job    # a newer prefix replaces the queued one
+            self._warm_idle.clear()
+            if self._warm_thread is None or not self._warm_thread.is_alive():
+                self._warm_stop = False
+                self._warm_thread = threading.Thread(target=self._warm_loop, daemon=True, name="strata-idle-prefill")
+                self._warm_thread.start()
+            self._warm_cv.notify_all()
+        self._warm_drop(old)
+        return True
+
+    def stop_warm(self):
+        """End the idle prefill (server shutdown): no job is left queued, and a running one is stopped and drained
+        before this returns, so nothing is sent to an engine that is going away."""
+        with self._warm_cv:
+            self._warm_stop = True
+            job, self._warm_job = self._warm_job, None
+            self._warm_cv.notify_all()
+        self._warm_cancel.set()
+        self._warm_drop(job)
+        self._warm_idle.set()
+        thread, self._warm_thread = self._warm_thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=60.0)
+
+    def _warm_loop(self):
+        """The one idle prefill worker: it waits for a job, takes the FIFO only when nothing else wants it, and reads
+        the prefix with the engine (GEN 0).  It never loads an unloaded engine and never touches a request's figures."""
+        while True:
+            with self._warm_cv:
+                while self._warm_job is None and not self._warm_stop:
+                    self._warm_cv.wait()
+                if self._warm_stop:
+                    self._warm_idle.set()
+                    return
+            try:
+                if not self._warm_acquire():
+                    self._warm_settle()
+                    continue
+                try:
+                    with self._warm_cv:
+                        job, self._warm_job = self._warm_job, None
+                        self._warm_active = True
+                    self._warm_prefill(job)
+                finally:
+                    self.fifo.release()
+                    with self._warm_cv:
+                        self._warm_active = False
+                    self._warm_settle()
+            except Exception as e:                      # never take the worker down: the next request is unaffected
+                print(f"[strata] the idle prefill: {e}", flush=True)
+                self._warm_settle()
+
+    def _warm_acquire(self) -> bool:
+        """Take the FIFO for the idle prefill without ever blocking a request: give way while one is on its way, and
+        take it only while there is still a job to run."""
+        while not self._warm_cancel.is_set() and not self._warm_stop:
+            with self._warm_cv:
+                if self._warm_job is None:
+                    return False
+            if self.fifo.acquire(timeout=0.25):
+                return True
+        return False
+
+    def _warm_prefill(self, job):
+        """Read one job's prefix into the engine (the caller holds the FIFO).  Nothing to do - a request arrived, the
+        engine is gone or cannot prefill - is a normal outcome, not an error."""
+        try:
+            if job is None or self._warm_cancel.is_set():
+                return
+            if getattr(self.engine, "batch", 0) or not getattr(self.engine, "prefill_only", False):
+                return
+            if not self.loaded() or getattr(self.engine, "unloaded", False):
+                return
+            self.engine.prefill(job["ids"], job["sampling"], self._warm_cancel, embeddings=job["embeddings"])
+        except (EngineDied, EngineSilent, ValueError) as e:
+            print(f"[strata] the idle prefill did not run: {e}", flush=True)
+        finally:
+            self._warm_drop(job)
+
+    def _warm_ids(self, ctx, reply) -> list[int]:
+        """The tokens the next request's prompt will start with: this request's history plus the reply as the client
+        will send it back (its content and completed tool calls, no reasoning), rendered with the turn that will
+        follow it and then cut back to the end of the reply's turn.  The dummy turn matters: the template formats a
+        trailing assistant turn differently after a future user than after a future tool result, so appending the
+        role that will really follow makes the reply render the way it will once the client's next message is there."""
+        messages = list(ctx["messages"]) + [reply]
+        dummy = {"role": "tool", "content": "\u0000warm"} if reply.get("tool_calls") else \
+            {"role": "user", "content": "\u0000warm"}
+        marked, marked_tools, changed = mark_think_literals(messages + [dummy], ctx["tools"])
+        prompt = self.render_history(marked, marked_tools, ctx["kwargs"])
+        prompt = prompt[:prompt.rindex("<|im_start|>")]      # the dummy turn is the last one: drop it entirely
+        ids = self._encode_rendered(prompt, changed)
+        if ctx.get("image_counts") is not None:              # the history's images, as the request expanded them
+            ids = self._expand_images(ids, ctx["image_counts"])
+        return ids
+
+    @staticmethod
+    def _warm_differs(held, canonical) -> bool:
+        """Whether the engine's held tokens and the canonical prefix differ inside the prefix: if one starts with the
+        other the engine already reuses it and the idle prefill would be wasted work (the non-thinking path)."""
+        n = min(len(held), len(canonical))
+        return held[:n] != canonical[:n]
+
+    def _schedule_warm(self, ctx, ids, held, answer, calls, truncated, finish, cancel, sampling, emb) -> bool:
+        """Hand the idle prefill the canonical next-turn prefix for this reply, or do nothing.  -> whether it took the
+        request's image embeddings file (the worker unlinks it then, this request must not).  Only a completed, clean
+        answer is warmed: no cancel, disconnect, error, or tool call the output ended inside.  Called under the FIFO."""
+        if ctx is None or ctx["kwargs"].get("preserve_thinking") is True or finish != "stop" \
+                or cancel.is_set() or truncated or (not answer and not calls):
+            return False                                 # a client that keeps its thinking already matches the engine
+        reply = {"role": "assistant", "content": "".join(answer)}
+        if calls:
+            reply["tool_calls"] = [{"function": {"name": c.name, "arguments": c.arguments}} for c in calls]
+        try:
+            canonical = self._warm_ids(ctx, reply)
+        except (ValueError, KeyError, TypeError) as e:       # a template or a count this cannot take apart
+            print(f"[strata] the idle prefill's prompt could not be built: {e}", flush=True)
+            return False
+        ctx_tokens = getattr(self.engine, "known_ctx", 0) or getattr(self.engine, "max_context", 0)
+        if len(canonical) < 2 or (ctx_tokens > 0 and len(canonical) + CTX_SLACK > ctx_tokens):
+            return False
+        if not self._warm_differs(held, canonical):
+            return False                                     # the engine already holds this prefix
+        if not self.schedule_warm(canonical, sampling, embeddings=emb, unlink=emb):
+            return False
+        print(f"[strata] idle prefill: the next turn's {len(canonical)}-token prefix will be read while idle",
+              flush=True)
+        return bool(emb)
+
     def run(self, ids, thinking, tools, max_new, sampling, cancel) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..})."""
+        ctx = getattr(self.req_ctx, "pending", None)     # what prepare() saw (None: run() without prepare)
+        self.req_ctx.pending = None
         budget = self.reasoning_budget(sampling) if thinking else None   # #123: opt-in, off by default
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
@@ -2556,6 +2863,9 @@ class Service:
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb = getattr(self.embeddings, "path", None)
+        answer, calls, announced = [], [], set()        # this reply's content and its completed tool calls
+        held = list(ids)                                # the tokens the engine holds after this request
+        tail_events, warm_emb = [], False               # parser.finish()'s events; whether the warm owns the .sve
         # Identity token: only a DONE line replaces engine.last, so a request that died, errored or was
         # disconnected must not have the PREVIOUS request's decode figures recorded as its own.
         engine_last0 = getattr(self.engine, "last", None)
@@ -2566,12 +2876,16 @@ class Service:
         par = bool(getattr(self.engine, "batch", 0))
         st = {} if par else self.status
         rate = collections.deque(maxlen=32) if par else self.rate
+        if not par:
+            self.cancel_warm()             # a request is on its way: the idle prefill gives way before we wait
         with self.status_lock:
             self.status["queued"] += 1
         try:
             # --batch: the engine runs several requests at once (StrataEngine.generate_batched orders them)
             with (contextlib.nullcontext() if getattr(self.engine, "batch", 0) else self.fifo):
                 try:
+                    if not par:
+                        self._warm_cancel.clear()   # this request holds the FIFO now: no prefill is running
                     with self.status_lock:
                         if trace is not None:
                             trace["queue_s"] += round(time.perf_counter() - waiting, 3)
@@ -2594,6 +2908,7 @@ class Service:
                     last_print = time.time()
                     prompt, thought = ids, 0            # thought: the reasoning tokens so far (the budget's count)
                     while True:
+                        held = list(prompt)          # the engine's live after this pass (its prompt plus what it yields)
                         gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
@@ -2604,6 +2919,7 @@ class Service:
                                     yield "ping", None
                                     continue
                                 n += 1
+                                held.append(t)
                                 if trace is not None and trace["first_token_s"] is None:
                                     with self.status_lock:
                                         trace["first_token_s"] = round(time.perf_counter() - trace["_clock"], 3)
@@ -2622,6 +2938,7 @@ class Service:
                                 evs = parser.feed(detok.push(t))
                                 self._note(n, evs, st, rate)
                                 last_print = self._progress(last_print, st=st)
+                                collect_reply(evs, answer, calls, announced)
                                 for ev in evs:
                                     yield "event", ev
                                 if budget and parser.state == "reasoning":
@@ -2665,9 +2982,11 @@ class Service:
                         for t in extra:
                             n += 1
                             raw_ids.append(t)
+                            held.append(t)
                             thinking_n += parser.state == "reasoning"
                             evs = parser.feed(detok.push(t))
                             self._note(n, evs, st, rate)
+                            collect_reply(evs, answer, calls, announced)
                             for ev in evs:
                                 yield "event", ev
                         prompt = prompt + seg + extra
@@ -2759,13 +3078,37 @@ class Service:
                                 self.status.update(busy=False)
                                 self.status.pop("tail", None)
                                 self.status.pop("tool", None)
+                    # The idle prefill: the parser's held tail belongs to this reply too, so flush it here (it is
+                    # yielded below) and hand the worker the canonical next-turn prefix while the FIFO is still held.
+                    open_call = parser.state == "call"
+                    tail_events = parser.finish()
+                    collect_reply(tail_events, answer, calls, announced)
+                    if not par:
+                        warm_emb = self._schedule_warm(
+                            ctx, ids, held, answer, calls, finish=finish, cancel=cancel, sampling=sampling, emb=emb,
+                            truncated=bool(announced) or (open_call and not any(ev.kind == "tool_call"
+                                                                                 for ev in tail_events)))
         finally:
-            if emb:
+            if emb and not warm_emb:                # a scheduled idle prefill owns the file now (it unlinks it)
                 Path(emb).unlink(missing_ok=True)
-        for ev in parser.finish():
+        for ev in tail_events:
             yield "event", ev
         yield "done", {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
                        "timings": timings, "reasoning_tokens": thinking_n}
+
+
+def collect_reply(evs, answer: list, calls: list, announced: set) -> None:
+    """This reply's own text and completed tool calls, from the parser's events (for the idle prefill's canonical
+    next-turn prefix): a "tool_start" is a call the output has announced, a "tool_call" completes it - one that is
+    still in `announced` when the output ends is a call it ended inside, which is never warmed."""
+    for ev in evs:
+        if ev.kind == "content":
+            answer.append(ev.text)
+        elif ev.kind == "tool_start" and ev.call is not None:
+            announced.add(ev.call.id)
+        elif ev.kind == "tool_call" and ev.call is not None:
+            announced.discard(ev.call.id)
+            calls.append(ev.call)
 
 
 def prompt_tokens_seen(prompt_tokens: int, last: dict) -> int:
@@ -3810,7 +4153,9 @@ def make_handler(svc: Service):
             responses_api.check_request(req)
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
-            kw = responses_api.template_kwargs(req, svc.shared)
+            # the Responses API is the one client that gets its thinking back and replays it, so it is part of the
+            # prompt rather than history to leave out: keep it (the chat path's default drops historical thinking)
+            kw = {**responses_api.template_kwargs(req, svc.shared), "preserve_thinking": True}
             try:
                 messages, validator = prepare_format(responses_api.text_format(req), messages)
             except ValueError as e:
@@ -4447,8 +4792,8 @@ def main() -> int:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
     except KeyboardInterrupt:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
-        closers = [httpd.shutdown, getattr(engine, "close", None), vision.close if vision else None,
-                   hub.close if hub is not None else None]
+        closers = [httpd.shutdown, svc.stop_warm, getattr(engine, "close", None),
+                   vision.close if vision else None, hub.close if hub is not None else None]
         for close in filter(None, closers):
             try:
                 close()
