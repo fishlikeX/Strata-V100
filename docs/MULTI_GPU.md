@@ -89,7 +89,11 @@ test and 5.39% in a confirmation test against 384 slots. 32K prefill was
 unchanged. A 96-slot ring reduced 32K prefill, and DMA decode was slower than
 the automatic mechanism. These tests show no decode gain and do not rule out
 a decode regression. Keep the ring setting opt-in for short-prompt prefill.
-The private runtime configuration and engine defaults are unchanged.
+At benchmark time, the private runtime configuration and engine defaults were
+unchanged; the tests used a separate IQ3_S server. The installed V100 deployment
+now sets `STRATA_SPLIT_RING=192` in its boot template (`strata-v100.service`);
+see [Starting the V100 IQ3_S server as a user service](DETAILS.md#starting-the-v100-iq3_s-server-as-a-user-service).
+This remains an opt-in short-prompt prefill setting, not a universal default.
 See the [expert transfer report](../benchmarks/v100-iq3_s-expert-transfer-2026-10-06.md)
 for the measurements, correctness limits, and reproduction commands.
 

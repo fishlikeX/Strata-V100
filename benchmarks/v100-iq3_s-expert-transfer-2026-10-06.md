@@ -146,8 +146,9 @@ the split override and uses the normal ring rule; it does not disable streaming.
 Remove the new entry to return to the original configuration.
 
 This is an opt-in prefill setting, not a demonstrated decode optimization.
-The live configuration is unchanged. No universal automatic ring change is
-included. Do not extrapolate these measurements to Q2_0, another GPU, a
+The live configuration was unchanged during the benchmarks. The deployment
+follow-up below records its later activation. No universal automatic ring
+change is included. Do not extrapolate these measurements to Q2_0, another GPU, a
 different context capacity, or prompts longer than the measured lengths.
 
 
@@ -249,3 +250,29 @@ After the tests, the original server was loaded again. `/health` reported
 returned HTTP 200 and generated eight tokens. The installed engine hash did
 not change. The systemd unit was inactive before the tests; it was not started
 or modified. The tests used the separate IQ3_S server that was already running.
+
+## Deployment follow-up (2026-10-06)
+
+The installed `strata-v100.service` unit was updated after the measurements
+above. It now starts the IQ3_S deployment: the description names IQ3_S, the
+unit sets `STRATA_SPLIT_RING=192`, the server reads the private IQ3_S run
+configuration, and a mount-point guard precedes the start.
+
+The unit was enabled and started as a user service. The server and engine ran
+in the unit's cgroup. The engine log identified the native IQ3_S pack and an
+8,192-token chunk with a 192-slot ring. `/health` reported the 524,288-token
+context loaded. An authenticated request read 4,852 fresh prompt tokens, with
+zero reused tokens, and returned `OK`.
+
+A normal `systemctl --user restart strata-v100` was also tested. The restarted
+engine retained the 192-slot setting, health was loaded, and another generation
+returned `OK`. The mount-point check exited successfully. The unit is enabled,
+and lingering was already enabled, so startup does not require a login.
+The model mount has a persistent filesystem entry. No reboot or power cycle
+was performed.
+
+The engine binary, kernels, and the expert routing context are unchanged from
+the measured configuration. The historical result in this report stays as
+measured: the systemd unit was inactive during the tests, and they used the
+separate IQ3_S server that was already running. Process IDs and private
+configuration values are not recorded here.
