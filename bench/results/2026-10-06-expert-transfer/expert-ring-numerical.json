@@ -1,0 +1,379 @@
+{
+  "harness": "bench/check_v100_ring.py",
+  "harness_sha256": "db8a50970590c67a974e29d7dbd57f2b72068d14af45ea48c70257a183ec6ff6",
+  "engine_sha256": "903982948bdf67650c9474329dffcb915750e0bf31a043499b3dcd9ead2a38db",
+  "seed": 617,
+  "scope": "600 teacher-forced tail positions after a batched head; not free-running decode quality or general equivalence",
+  "runs": [
+    {
+      "label": "numerical-4k",
+      "prompt": {
+        "seed": 617,
+        "target": 4096,
+        "repeat": 1,
+        "total_tokens": 4697,
+        "head_batched_tokens": 4096,
+        "turn_token": 248045,
+        "tail_window_tokens": 600,
+        "tail_ok": true,
+        "sha256": "8f4e1e8f66aa7619d610b912178379a8c6b5803e6edfdede2fb7c145f5e9f2dd",
+        "first_ids": [
+          58,
+          26157,
+          220,
+          15,
+          15,
+          15,
+          15,
+          15,
+          17,
+          21,
+          24,
+          259
+        ],
+        "last_ids": [
+          17,
+          19,
+          15,
+          7789
+        ]
+      },
+      "status": "ok",
+      "ring_resolution": {
+        "requested": 192,
+        "arms": {
+          "default": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "default-control": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "ring192": {
+            "chunk": 8192,
+            "ring": 192,
+            "split_ring": 192,
+            "resident_pct": 37
+          }
+        },
+        "rings_differ": true
+      },
+      "same_arm_control": {
+        "exact_match": true,
+        "warning": null
+      },
+      "comparisons": {
+        "default_vs_default-control": {
+          "label_a": "default",
+          "label_b": "default-control",
+          "positions": 600,
+          "positions_only_in_a": 0,
+          "positions_only_in_b": 0,
+          "target_mismatches": 0,
+          "argmax_agreements": 600,
+          "argmax_agreement_pct": 100.0,
+          "argmax_disagreement_positions": [],
+          "top10_overlap_pct": 100.0,
+          "mean_lp_true_a": -1.450849,
+          "mean_lp_true_b": -1.450849,
+          "ppl_a": 4.266734,
+          "ppl_b": 4.266734,
+          "lp_identical": true,
+          "exact_match": true
+        },
+        "default_vs_ring192": {
+          "label_a": "default",
+          "label_b": "ring192",
+          "positions": 600,
+          "positions_only_in_a": 0,
+          "positions_only_in_b": 0,
+          "target_mismatches": 0,
+          "argmax_agreements": 600,
+          "argmax_agreement_pct": 100.0,
+          "argmax_disagreement_positions": [],
+          "top10_overlap_pct": 100.0,
+          "mean_lp_true_a": -1.450849,
+          "mean_lp_true_b": -1.450849,
+          "ppl_a": 4.266734,
+          "ppl_b": 4.266734,
+          "lp_identical": true,
+          "exact_match": true
+        }
+      },
+      "arms": [
+        {
+          "label": "default",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "control_same_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        },
+        {
+          "label": "default-control",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "control_same_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        },
+        {
+          "label": "ring192",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 192,
+            "split_ring": 192,
+            "resident_pct": 37
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "candidate_ring_requested": true,
+            "candidate_split_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        }
+      ]
+    },
+    {
+      "label": "numerical-32k",
+      "prompt": {
+        "seed": 617,
+        "target": 32768,
+        "repeat": 1,
+        "total_tokens": 33369,
+        "head_batched_tokens": 32768,
+        "turn_token": 248045,
+        "tail_window_tokens": 600,
+        "tail_ok": true,
+        "sha256": "db5be557e9af900a96284cdfe96c18a62752b1251003c030ee3dd5d36dd696aa",
+        "first_ids": [
+          58,
+          26157,
+          220,
+          15,
+          15,
+          15,
+          15,
+          15,
+          17,
+          21,
+          24,
+          259
+        ],
+        "last_ids": [
+          4528,
+          220,
+          15,
+          13
+        ]
+      },
+      "status": "ok",
+      "ring_resolution": {
+        "requested": 192,
+        "arms": {
+          "default": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "default-control": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "ring192": {
+            "chunk": 8192,
+            "ring": 192,
+            "split_ring": 192,
+            "resident_pct": 37
+          }
+        },
+        "rings_differ": true
+      },
+      "same_arm_control": {
+        "exact_match": false,
+        "warning": "numerical control warning: the same-arm pair (default run 1 vs run 2) is NOT bit-exact on the scored tail -- argmax 99.1667%, top-10 91.35%, PPL 1.101975 vs 1.116054, 595/600 agreements. Run-to-run nondeterminism of this size is present in this run, so the arm-to-arm differences cannot be attributed to the ring. This is a warning, not a pass/fail gate."
+      },
+      "comparisons": {
+        "default_vs_default-control": {
+          "label_a": "default",
+          "label_b": "default-control",
+          "positions": 600,
+          "positions_only_in_a": 0,
+          "positions_only_in_b": 0,
+          "target_mismatches": 0,
+          "argmax_agreements": 595,
+          "argmax_agreement_pct": 99.1667,
+          "argmax_disagreement_positions": [
+            32769,
+            32774,
+            32780,
+            32806,
+            33118
+          ],
+          "top10_overlap_pct": 91.35,
+          "mean_lp_true_a": -0.097104,
+          "mean_lp_true_b": -0.109799,
+          "ppl_a": 1.101975,
+          "ppl_b": 1.116054,
+          "lp_identical": false,
+          "exact_match": false
+        },
+        "default_vs_ring192": {
+          "label_a": "default",
+          "label_b": "ring192",
+          "positions": 600,
+          "positions_only_in_a": 0,
+          "positions_only_in_b": 0,
+          "target_mismatches": 0,
+          "argmax_agreements": 595,
+          "argmax_agreement_pct": 99.1667,
+          "argmax_disagreement_positions": [
+            32769,
+            32774,
+            32780,
+            32806,
+            33118
+          ],
+          "top10_overlap_pct": 91.3167,
+          "mean_lp_true_a": -0.097104,
+          "mean_lp_true_b": -0.109399,
+          "ppl_a": 1.101975,
+          "ppl_b": 1.115608,
+          "lp_identical": false,
+          "exact_match": false
+        }
+      },
+      "arms": [
+        {
+          "label": "default",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "control_same_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        },
+        {
+          "label": "default-control",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 384,
+            "split_ring": null,
+            "resident_pct": null
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "control_same_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        },
+        {
+          "label": "ring192",
+          "status": "ok",
+          "resolved": {
+            "chunk": 8192,
+            "ring": 192,
+            "split_ring": 192,
+            "resident_pct": 37
+          },
+          "failures": [],
+          "gates": {
+            "no_engine_error": true,
+            "reused_zero": true,
+            "prompt_read_full": true,
+            "resolved_ring_logged": true,
+            "batched_head_pp": true,
+            "pp_full_prompt": true,
+            "scored_positions_600": true,
+            "matched_targets": true,
+            "topk_complete": true,
+            "candidate_ring_requested": true,
+            "candidate_split_ring": true,
+            "rings_differ": true
+          },
+          "reused": 0
+        }
+      ]
+    }
+  ]
+}
