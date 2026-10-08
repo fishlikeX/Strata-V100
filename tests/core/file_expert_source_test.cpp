@@ -170,8 +170,13 @@ void test_canonical_layout() {
                 source.blob(layers, 0) == nullptr && source.blob(0, experts) == nullptr,
             "canonical bounds check accepted an invalid layer or expert");
     require(source.reads() == 3, "invalid canonical lookups changed the read count");
+    // #1353: a canonical pack has no GGUF role slices, so the source cannot measure a page-cache share; a
+    // non-positive sample count is not measured either.  Both answer the cannot-tell sentinel.
+    require(source.cached_share(64) < 0.0 && source.cached_share(0) < 0.0 && source.cached_share(-4) < 0.0,
+            "canonical cached_share did not answer the cannot-tell sentinel");
     ArenaExpertSource arena;
     require(arena.open(dir.path.string(), layers, experts, 1, err, BLOB), err);
+    require(arena.cached_share(64) < 0.0, "arena cached_share claimed a file page-cache share");
     const uint8_t* cpu_view = arena.pinned_blob(0, 0);
     if (arena.pinned(0, 0)) {
         require(cpu_view && cpu_view[0] == 'a', "arena CPU view read the wrong expert");

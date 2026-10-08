@@ -1,0 +1,278 @@
+{
+  "baseline": {
+    "2048": {
+      "prefill_tps": 420.09,
+      "decode_tps": 56.25879043600563,
+      "prompt_ms": 4875.1,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 37.0,
+      "temp_max_c": 44.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 1005.3,
+      "decode_tps": 57.10206995003569,
+      "prompt_ms": 8148.8,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 40.0,
+      "temp_max_c": 50.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1645.83,
+      "decode_tps": 52.64889766370517,
+      "prompt_ms": 19909.7,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 43.0,
+      "temp_max_c": 61.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "baseline-return": {
+    "2048": {
+      "prefill_tps": 419.95,
+      "decode_tps": 54.904988632951564,
+      "prompt_ms": 4876.8,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 44.0,
+      "temp_max_c": 53.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 1001.3,
+      "decode_tps": 57.69664187514086,
+      "prompt_ms": 8181.4,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 44.0,
+      "temp_max_c": 56.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1651.3,
+      "decode_tps": 55.41365427074765,
+      "prompt_ms": 19843.8,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 46.0,
+      "temp_max_c": 63.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "conservative": {
+    "2048": {
+      "prefill_tps": 419.77,
+      "decode_tps": 58.88035328211969,
+      "prompt_ms": 4878.9,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 45.0,
+      "temp_max_c": 55.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 998.31,
+      "decode_tps": 53.99249166912727,
+      "prompt_ms": 8205.9,
+      "generated_per_row": [
+        128,
+        128,
+        10
+      ],
+      "temp_min_c": 45.0,
+      "temp_max_c": 58.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1634.58,
+      "decode_tps": 54.038079959471446,
+      "prompt_ms": 20046.7,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 47.0,
+      "temp_max_c": 63.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "volta": {
+    "2048": {
+      "prefill_tps": 419.92,
+      "decode_tps": 59.39399563825345,
+      "prompt_ms": 4877.1,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 37.0,
+      "temp_max_c": 44.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 1001.1,
+      "decode_tps": 54.48199540308163,
+      "prompt_ms": 8183.0,
+      "generated_per_row": [
+        128,
+        128,
+        10
+      ],
+      "temp_min_c": 39.0,
+      "temp_max_c": 50.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1639.01,
+      "decode_tps": 54.5656066160798,
+      "prompt_ms": 19992.5,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 43.0,
+      "temp_max_c": 61.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "accounted": {
+    "2048": {
+      "prefill_tps": 421.62,
+      "decode_tps": 59.65697240865026,
+      "prompt_ms": 4857.4,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 45.0,
+      "temp_max_c": 53.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 1011.2,
+      "decode_tps": 54.505195026400955,
+      "prompt_ms": 8101.3,
+      "generated_per_row": [
+        128,
+        128,
+        10
+      ],
+      "temp_min_c": 45.0,
+      "temp_max_c": 57.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1645.83,
+      "decode_tps": 54.74296467368061,
+      "prompt_ms": 19909.7,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 47.0,
+      "temp_max_c": 63.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "selected": {
+    "2048": {
+      "prefill_tps": 700.96,
+      "decode_tps": 57.50431282346176,
+      "prompt_ms": 2921.7,
+      "generated_per_row": [
+        128,
+        128,
+        20
+      ],
+      "temp_min_c": 43.0,
+      "temp_max_c": 52.0,
+      "thermal_slowdown_samples": 0
+    },
+    "8192": {
+      "prefill_tps": 1009.56,
+      "decode_tps": 56.58709106984969,
+      "prompt_ms": 8114.4,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 43.0,
+      "temp_max_c": 56.0,
+      "thermal_slowdown_samples": 0
+    },
+    "32768": {
+      "prefill_tps": 1660.57,
+      "decode_tps": 57.26300720261262,
+      "prompt_ms": 19733.0,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 46.0,
+      "temp_max_c": 63.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "cpu-control": {
+    "2048": {
+      "prefill_tps": 419.8,
+      "decode_tps": 44.5884279095691,
+      "prompt_ms": 4878.5,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 44.0,
+      "temp_max_c": 54.0,
+      "thermal_slowdown_samples": 0
+    }
+  },
+  "cpu-extended": {
+    "2048": {
+      "prefill_tps": 676.49,
+      "decode_tps": 44.65220121398172,
+      "prompt_ms": 3027.4,
+      "generated_per_row": [
+        128,
+        128,
+        128
+      ],
+      "temp_min_c": 45.0,
+      "temp_max_c": 57.0,
+      "thermal_slowdown_samples": 0
+    }
+  }
+}
