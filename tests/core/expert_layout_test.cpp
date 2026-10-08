@@ -239,6 +239,14 @@ void arena() {
                     transient = transient && fs.transient(l, e);
                 }
             check(same && copies && transient, "blob() and copy_blob() equal the loaded arena byte for byte (transient)");
+            // #1353: the mapped GGUF role slices answer a page-cache share.  The blobs above were just read, so
+            // their pages are resident; a non-positive sample count cannot be measured.
+            check(fs.cached_share(0) < 0.0, "cached_share: a non-positive sample count answers -1");
+#if defined(__linux__)
+            check(fs.cached_share(64) >= 0.9, "cached_share: the just-read mapped slices read back as resident");
+#else
+            check(fs.cached_share(64) < 0.0, "cached_share: a non-Linux source claims no page-cache share");
+#endif
             // a blob asked again in the same layer is the same buffer; its bytes hold through two more layers
             fs.begin_layer(0, nullptr, 0);
             const uint8_t* p = fs.blob(0, 1);

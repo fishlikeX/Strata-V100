@@ -69,3 +69,26 @@ sm_80.
 - sm_60 (Pascal) is covered by the same flag but was not measured here.
 - Volta's tensor cores take FP16 only: a model's BF16 weights are converted, and a weight outside FP16's range would saturate (none did in
   the check above).
+
+## Selected v0.1.41 kernels
+
+Set `STRATA_SM70_TABLE=1` to select the interleaved dense-matvec table,
+native expert mode 8, and latency-hidden HC up projection on Volta.
+The individual settings `STRATA_MMVQ_IL`, `STRATA_EXP_MODE`, and
+`STRATA_GR_FAST` take precedence. Without the master setting, Volta retains
+the previous decode selection.
+
+Set `STRATA_EMB_REUSE_ACCOUNT=1` to let the prompt planner use the embedding
+buffer space reused by half outputs. Default accounting remains conservative.
+On the measured 8K chunk, this option reduces each stage's prompt loan by
+about 80 MiB. It does not establish a general prompt-speed gain.
+
+For the measured dual-V100 IQ3_S arena, `STRATA_PREFILL_CPU_SHARE=auto`
+and `STRATA_PREFILL_STREAM_MIN=3072` select CPU-assisted staging below
+3,072 tokens. The larger-chunk option can change prompt rounding.
+Do not enable it for batch slots or assume the same gain on other models.
+
+See the [release selection](../improvements/RELEASE-v0.1.41-V100.md)
+and [prefill/decode measurements](../benchmarks/v100-iq3_s-v0141-2026-10-08.md).
+The options do not change an installed service until its environment and
+engine are changed. Do not enable stage-buffer pinning for IQ3_S.
