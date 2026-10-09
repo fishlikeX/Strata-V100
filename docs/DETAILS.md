@@ -1701,6 +1701,23 @@ split, or `[1800]` for one GPU; the defaults match this model's encoder).  After
 request the encoder stops and the VRAM goes back to the caches (its encoded pictures stay cached on disk).  The
 first picture after an idle gap answers a few seconds later, so the encoder can start again.
 
+**GPU vision with GPU-only KV growth:** Set `"lazy": false` in the `"vision"` section and keep
+`"vram_elastic": false` in the main configuration. Remove `"idle_s"` from the vision section.
+The server starts the GPU image encoder before the text engine. The text engine then sizes its expert
+caches with the image encoder already in GPU memory. Image requests do not need the `VRAM` command.
+The encoder stays loaded between requests, so the expert caches have less memory for text requests.
+
+Do not enable `"vram_elastic": true` to repair this configuration. Elastic expert-cache allocation disables
+GPU-only KV growth. Lazy GPU vision with elastic VRAM disabled fails on the first uncached image with
+`VRAM needs an engine started with --vram-elastic`. Use resident GPU vision to keep image support and
+GPU-only KV growth together.
+
+The dual-V100 IQ3_S service was checked with this configuration. An image request returned HTTP 200 and
+correctly identified a red square on the left and a blue square on the right. A separate conversation
+screenshot request returned HTTP 200 and correctly summarized the staging deployment target and the
+requirement to keep image support enabled. The engine log confirmed GPU-only KV growth on both GPUs
+with a logical context of 524,288 cells. These checks did not measure long-context image throughput.
+
 **More image tokens (0.1.39, #625):** `--vision-tokens N` at setup (`START-HERE.bat --setup --vision cpu
 --vision-tokens 768`) sets the most tokens a picture becomes - `"max_tokens"` in the `"vision"` section of
 `strata-<model>.json`, which you can also edit by hand. More tokens keep more detail (small text, charts, screenshots)
