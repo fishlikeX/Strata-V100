@@ -1,0 +1,16 @@
+{
+  "engine_sha256": "1912b0731eddeb6b2e9ac81ec00c1de379c9ebcdc731441f5b104fe0491acba9",
+  "arm_label": "wmma-skip-gpu-grow",
+  "logical_context": 524288,
+  "kv_format": "int8",
+  "kv_resident": 0,
+  "layer_split": 16,
+  "pool_workers": 5,
+  "log_excerpts": [
+    "strata generate: elastic K/V on CUDA0: 16384 of 524288 cells in VRAM (0.08 of 2.06 GiB); the expert cache (7333 slots) gives the K/V room below slot 5764 as the context grows",
+    "strata generate: elastic K/V on CUDA1: 16384 of 524288 cells in VRAM (0.16 of 4.12 GiB); the expert cache (4843 slots) gives the K/V room below slot 3455 as the context grows",
+    "strata: K/V on CUDA0 grown to 40960 cells (0.17 GiB); the expert cache gave 57 slots for it, 22 hotter experts moved to colder ones' slots (7276 of 7333 slots hold experts)",
+    "strata: K/V on CUDA1 grown to 40960 cells (0.34 GiB); the expert cache gave 96 slots for it, 9 hotter experts moved to colder ones' slots (4747 of 4843 slots hold experts)"
+  ],
+  "scope": "Observed initial allocation and growth during the matched 2K/8K/32K matrix. The largest request is 32768 tokens; this is not a 524288-token workload test."
+}

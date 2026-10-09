@@ -554,10 +554,12 @@ is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 G
 RTX 5070, against ~3 tokens/s before these changes.
 
 **Switches added in 0.1.40 (all off unless noted; none changes the default output):**
-- `--kv-grow` (or `STRATA_KV_GROW=1`; `--no-kv-grow` turns it off): the K/V takes VRAM only for the cells the requests
-  reach, and the expert cache holds the rest, giving slots back as the context grows. It needs one GPU, an expert
-  profile, the whole K/V in VRAM (no KV streaming) and every expert in RAM (not the resident low-RAM mode); otherwise,
-  and with `--batch`, `--vram-elastic` or `--peer-device`, the engine says so and stays off.
+- `--kv-grow` (or `STRATA_KV_GROW=1`; `--no-kv-grow` turns it off): allocate physical GPU K/V memory only for the
+  context in use. The expert cache uses the remaining memory and releases slots when the context grows.
+  The logical `--max-context` capacity does not change. With a layer split, each GPU stage manages its own
+  K/V pools and expert cache. This option requires VMM support on each GPU, an expert profile, GPU-only K/V
+  (no KV streaming), and all experts in RAM (not the resident low-RAM mode). It does not support remote experts,
+  `--batch`, `--vram-elastic`, or `--peer-device`. The engine reports when these conditions disable the option.
 - `--host-core last` (or `STRATA_HOST_CORE=last`, Windows): the host thread runs on the last physical core and the
   workers take the first. Windows sends a GPU's interrupts to the first core, where a host spinning on the GPU's flags
   waits for them (`--host-core first` is the default; the startup log names the cores).

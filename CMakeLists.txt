@@ -489,6 +489,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(vmm_test PRIVATE strata_engine)
     add_test(NAME vmm_test COMMAND vmm_test)
     set_tests_properties(vmm_test PROPERTIES TIMEOUT 60)
+    # the device-local VMM contract: a range reserved on one device allocates, maps and frees on THAT device even
+    # when the ambient CUDA device changed (the split-stage --kv-grow).  Reads each chunk's physical device back
+    # from the driver; needs two VMM-capable devices (exit 77 skips).  Real CUDA only: it includes cuda.h.
+    if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/vmm_device_local_test.cpp")
+      add_executable(vmm_device_local_test tests/core/vmm_device_local_test.cpp)
+      target_include_directories(vmm_device_local_test PRIVATE ${_strata_gpu_include_directories})
+      target_link_libraries(vmm_device_local_test PRIVATE strata_engine)
+      add_test(NAME vmm_device_local_test COMMAND vmm_device_local_test)
+      set_tests_properties(vmm_device_local_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    endif()
   endif()
   # #477: the learned expert profile (--expert-profile-save): its order and make_profile.py's file format (CPU only)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/expert_profile_save_test.cpp")
@@ -774,6 +784,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # the prompt path's DeltaNet recurrence: gdn_rec_kh_kernel against gdn_rec_cols_pipe_kernel, bitwise (GPU,
   # synthetic, no model; --bench adds timings).  NVIDIA only: cp.async and the CUDA occupancy API (not on gfx906)
   if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
+    add_executable(pf_wmma_parity src/kernels/pf_wmma_parity.cpp)
+    target_include_directories(pf_wmma_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(pf_wmma_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME pf_wmma_parity COMMAND pf_wmma_parity)
+    set_tests_properties(pf_wmma_parity PROPERTIES SKIP_RETURN_CODE 77)
     # Independent pinned expert uploads: byte parity and stream/event ordering.
     add_executable(dma_batch_parity tests/core/dma_batch_parity.cu)
     target_include_directories(dma_batch_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -1257,6 +1272,16 @@ if(STRATA_NATIVE_EXPERTS)
     target_link_libraries(pool_native_concurrency_test PRIVATE strata_kernels_cpu)
     add_test(NAME pool_native_concurrency_test COMMAND pool_native_concurrency_test)
     set_tests_properties(pool_native_concurrency_test PROPERTIES TIMEOUT 60)
+  endif()
+
+  if(STRATA_BUILD_TESTS)
+    # ExpertPool::quant_act_rows (the native prefill stage's row batch): every needed row byte for byte against
+    # the serial per-row kernels (act_quant_any / native_quant_act), with the skipped rows and the padding past
+    # a row's activation left at their sentinel.
+    add_executable(cpu_pool_quant_rows_test src/kernels/cpu_pool_quant_rows_test.cpp)
+    target_link_libraries(cpu_pool_quant_rows_test PRIVATE strata_kernels_cpu)
+    add_test(NAME cpu_pool_quant_rows_test COMMAND cpu_pool_quant_rows_test)
+    set_tests_properties(cpu_pool_quant_rows_test PROPERTIES TIMEOUT 60)
   endif()
   set(_strata_mmq_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0)
   # #296: OrcaRouter Q4_K_S's Q5_0 experts (Q4_K and Q5_1 come with STRATA_MMQ_KQUANTS on CUDA, S5's branch)

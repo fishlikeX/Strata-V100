@@ -84,6 +84,8 @@ void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t
 void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream);
 /// h16[n, r] = fp16(silu(gu[n, 2r]) * gu[n, 2r + 1])   (the interleaved expert gate/up)
 void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream);
+/// h16[n, r] = fp16(silu(gu[n, r]) * gu[n, 640 + r]) (native expert gate/up).
+void swiglu_split(const float* gu, uint16_t* h16, int64_t n, void* stream);
 /// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate, width 640)
 void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream);
 /// dst[i] = src[i] for n int32s, as a kernel: either side may be mapped host memory, and the copy never waits
@@ -125,5 +127,18 @@ void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo
 void round_f16(const float* x, float* y, int64_t n, void* stream);
 /// Expert blob -> FP16 (Q2_0 values are exact in FP16).
 void blob_dequant_f16(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream);
+
+// ---- indirect WMMA expert weight tables (the CUDA Volta prompt experts)
+/// The most experts one indirect weight table covers (a grouped WMMA launch's group; MMQ_GROUP in the prompt path).
+constexpr int kExpertPtrTableMax = 16;
+#if !defined(STRATA_USE_HIP)
+/// Builds the device pointer table `strata::kernels::gemm_iq_f16_grouped` reads when its `indirect_weights`
+/// argument is true: dst_gu[i] / dst_dn[i] = expert i's gate/up and down weights (the expert's own blob, in
+/// the group's order), for i < n <= kExpertPtrTableMax.  Entries past n are left as they were - the launch's
+/// expert count bounds its grid, so it never reads them.  The pointers travel in the kernel's arguments BY
+/// VALUE, so the asynchronous launch copies them: the caller's arrays need not outlive this call.
+void expert_ptr_table(const void* const* gu, const void* const* dn, int n, const void** dst_gu,
+                      const void** dst_dn, void* stream);
+#endif
 
 }  // namespace strata::prefill

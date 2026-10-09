@@ -528,7 +528,7 @@ struct ElasticPool {
 std::vector<std::unique_ptr<ElasticPool>> g_pools;
 
 int64_t pool_chunks(const ElasticPool& p, size_t a, int64_t slots) {
-    const uint64_t G = strata::core::vmm_granularity();
+    const uint64_t G = p.range.granularity();
     return (int64_t) (((uint64_t) slots * p.per_slot[a] + G - 1) / G);
 }
 int64_t pool_slots(const ElasticPool& p, int64_t cells) {
@@ -536,7 +536,7 @@ int64_t pool_slots(const ElasticPool& p, int64_t cells) {
 }
 /// Whole page slots every array of the pool has mapped.
 int64_t pool_slots_mapped(const ElasticPool& p) {
-    const uint64_t G = strata::core::vmm_granularity();
+    const uint64_t G = p.range.granularity();
     int64_t slots = p.n_slots;
     for (size_t a = 0; a < p.off.size(); ++a) {
         const int64_t c0 = (int64_t) (p.off[a] / G);
@@ -548,7 +548,7 @@ int64_t pool_slots_mapped(const ElasticPool& p) {
     return slots;
 }
 bool pool_grow(ElasticPool& p, int64_t cells, const std::function<strata::core::VmmChunk()>& take) {
-    const uint64_t G = strata::core::vmm_granularity();
+    const uint64_t G = p.range.granularity();
     const int64_t slots = pool_slots(p, cells);
     for (size_t a = 0; a < p.off.size(); ++a) {
         const int64_t c0 = (int64_t) (p.off[a] / G), c1 = c0 + pool_chunks(p, a, slots);
@@ -578,15 +578,18 @@ void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
     if (init_cells > 0) g_kv_elastic_init = init_cells;
 }
 bool qsa_kv_elastic() { return g_kv_elastic; }
-int64_t qsa_kv_elastic_cells() {
+int64_t qsa_kv_elastic_cells(int device) {
     int64_t cells = std::numeric_limits<int64_t>::max();
-    for (const auto& p : g_pools) cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
+    for (const auto& p : g_pools)
+        if (device < 0 || p->range.device() == device)
+            cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
     return cells;
 }
-int64_t qsa_kv_elastic_need(int64_t cells) {
-    const uint64_t G = strata::core::vmm_granularity();
+int64_t qsa_kv_elastic_need(int device, int64_t cells) {
     int64_t n = 0;
     for (const auto& p : g_pools) {
+        if (p->range.device() != device) continue;
+        const uint64_t G = p->range.granularity();
         const int64_t slots = pool_slots(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, slots);
@@ -595,15 +598,16 @@ int64_t qsa_kv_elastic_need(int64_t cells) {
     }
     return n;
 }
-bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChunk()>& take) {
+bool qsa_kv_elastic_grow(int device, int64_t cells, const std::function<strata::core::VmmChunk()>& take) {
     for (auto& p : g_pools)
-        if (!pool_grow(*p, cells, take)) return false;
+        if (p->range.device() == device && !pool_grow(*p, cells, take)) return false;
     return cudaDeviceSynchronize() == cudaSuccess;
 }
-int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give) {
-    const uint64_t G = strata::core::vmm_granularity();
+int64_t qsa_kv_elastic_shrink(int device, int64_t cells, const std::function<void(strata::core::VmmChunk)>& give) {
     int64_t n = 0;
     for (auto& p : g_pools) {
+        if (p->range.device() != device) continue;
+        const uint64_t G = p->range.granularity();
         const int64_t slots = pool_slots(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, slots);
@@ -614,14 +618,18 @@ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::co
     }
     return n;
 }
-uint64_t qsa_kv_elastic_mapped_bytes() {
+uint64_t qsa_kv_elastic_mapped_bytes(int device) {
     uint64_t n = 0;
-    for (const auto& p : g_pools) n += (uint64_t) p->range.mapped_count() * strata::core::vmm_granularity();
+    for (const auto& p : g_pools)
+        if (device < 0 || p->range.device() == device)
+            n += (uint64_t) p->range.mapped_count() * p->range.granularity();
     return n;
 }
-uint64_t qsa_kv_elastic_full_bytes() {
+uint64_t qsa_kv_elastic_full_bytes(int device) {
     uint64_t n = 0;
-    for (const auto& p : g_pools) n += (uint64_t) p->range.chunks() * strata::core::vmm_granularity();
+    for (const auto& p : g_pools)
+        if (device < 0 || p->range.device() == device)
+            n += (uint64_t) p->range.chunks() * p->range.granularity();
     return n;
 }
 namespace {
