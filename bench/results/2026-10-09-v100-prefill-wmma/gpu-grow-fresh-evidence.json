@@ -1,0 +1,19 @@
+{
+  "engine_sha256": "e930ad63cd26b4442f4ab03c44fc00aee79fda304d93c9561283f596be41b631",
+  "arm_label": "gpu-grow-transition-smoke",
+  "requested_initial_cells": 512,
+  "observed_initial_cells": 4096,
+  "cache_retention_floor": 100000,
+  "logical_context": 524288,
+  "kv_format": "int8",
+  "request_sequence": [32768, 8192, 32768],
+  "errors": 0,
+  "reused_tokens": 0,
+  "repeated_long_prompt_hash_equal": true,
+  "repeated_long_first_output_token_equal": true,
+  "log_excerpts": [
+    "strata: K/V on CUDA0 grown to 40960 cells (0.17 GiB); the expert cache gave 0 slots for it, 0 hotter experts moved to colder ones' slots (7360 of 7360 slots hold experts) - and new VRAM, the cache being at its floor",
+    "strata: K/V on CUDA1 grown to 40960 cells (0.34 GiB); the expert cache gave 0 slots for it, 0 hotter experts moved to colder ones' slots (4891 of 4891 slots hold experts) - and new VRAM, the cache being at its floor"
+  ],
+  "limits": "Diagnostic settings and prompt pool differ from the selected matrix. This run proves fresh growth on both GPUs, not cache-donation shrink or full-output quality. No shrink record occurs in this high-floor case."
+}

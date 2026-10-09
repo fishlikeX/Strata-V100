@@ -1,0 +1,20 @@
+{
+  "engine_sha256": "e930ad63cd26b4442f4ab03c44fc00aee79fda304d93c9561283f596be41b631",
+  "arm_label": "gpu-grow-cache-transition-smoke",
+  "logical_context": 524288,
+  "kv_format": "int8",
+  "request_sequence": [32768, 8192, 32768],
+  "errors": 0,
+  "reused_tokens": 0,
+  "repeated_long_prompt_hash_equal": true,
+  "repeated_long_first_output_token_equal": true,
+  "log_excerpts": [
+    "strata: K/V on CUDA0 grown to 40960 cells (0.17 GiB); the expert cache gave 57 slots for it, 28 hotter experts moved to colder ones' slots (7276 of 7333 slots hold experts)",
+    "strata: K/V on CUDA1 grown to 40960 cells (0.34 GiB); the expert cache gave 96 slots for it, 42 hotter experts moved to colder ones' slots (4747 of 4843 slots hold experts)",
+    "strata: K/V on CUDA0 trimmed to 16384 cells; 57 slots back to the expert cache, refilled from the profile",
+    "strata: K/V on CUDA1 trimmed to 16384 cells; 96 slots back to the expert cache, refilled from the profile",
+    "strata: K/V on CUDA0 grown to 40960 cells (0.17 GiB); the expert cache gave 57 slots for it, 0 hotter experts moved to colder ones' slots (7276 of 7333 slots hold experts)",
+    "strata: K/V on CUDA1 grown to 40960 cells (0.34 GiB); the expert cache gave 96 slots for it, 3 hotter experts moved to colder ones' slots (4747 of 4843 slots hold experts)"
+  ],
+  "limits": "Diagnostic prompt pool, repeat count, and output cap differ from the selected matrix. This is transition evidence, not a baseline-comparable performance or full-output quality result."
+}

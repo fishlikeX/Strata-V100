@@ -165,6 +165,11 @@ public:
     int p_threads() const { return topo_.p_threads; }
     int e_cores() const { return topo_.e_cores; }
     PoolAffinity affinity() const { return affinity_; }
+    /// The calling thread's affinity as captured by the constructor, before any worker was created.  A caller
+    /// that builds an asynchronous CPU submitter can hand this to `restore_thread_affinity` so the new thread
+    /// starts from the submitter's allowed CPUs rather than inheriting a GPU driver's single-core pin.
+    /// `valid` is false when the capture failed, which `restore_thread_affinity` treats as a no-op.
+    const ThreadAffinity& submission_affinity() const { return submission_affinity_; }
 
     /// Publish `n` jobs, then block until every one has been claimed AND every worker has parked.
     /// `jobs` must outlive the call (it does, and the workers never touch it afterwards).
@@ -183,6 +188,26 @@ public:
     /// call is serialized, including every scratch-buffer subbatch and its quantization.
     /// Other pool methods and destruction must not overlap these calls.
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n);
+
+    /// The activation rows a native CPU prefill stage must quantize before `run_split_multi_native`,
+    /// described so the pool can spread them across its threads instead of the submitting thread doing
+    /// them serially. `need` is one byte per row (non-zero: the CPU's experts read that row). `actq`
+    /// receives the Q2_0 activation for a `q2_native_kernels(gu_type)` layer, `nact` the packed native
+    /// activation (`kNativeActBytes` per row) otherwise. Every buffer is the caller's and must outlive
+    /// the call.
+    struct ActRows {
+        const float* x;      ///< `n_rows * n_embd` row-major activations
+        const char* need;    ///< `n_rows` flags; a zero row is skipped
+        int64_t n_rows;
+        int n_embd;
+        ActQ* actq;          ///< the Q2_0 destination, one entry per row
+        uint8_t* nact;       ///< the native destination, `kNativeActBytes` per row
+    };
+    /// Quantize `rows` across the pool's threads with the same per-row kernels and destinations as the
+    /// submitting thread's serial loop. Serialized against the other native batch entry points by the
+    /// same lock, and exclusive in the same sense as `run_split_multi_native`: other pool methods and
+    /// destruction must not overlap it, and `rows` and everything it points at must live through the call.
+    void quant_act_rows(const NativeFmt& f, const ActRows& rows);
     static constexpr int kMaxSplitMulti = 96;
     /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
@@ -294,7 +319,9 @@ private:
         alignas(64) uint8_t hq[MAXT][kNativeHBytes];   // plan v0.3 P6: native down activations
     };
     const NativeFmt* nfmt_ = nullptr;
+    const ActRows* arows_ = nullptr;   // mode 7: the row batch `quant_act_rows` is quantizing
     std::vector<SplitBufMulti> split_multi_;
+    ThreadAffinity submission_affinity_;
     PoolAffinity affinity_ = PoolAffinity::All;
     CpuTopology topo_;
 };

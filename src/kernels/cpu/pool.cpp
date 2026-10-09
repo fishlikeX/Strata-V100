@@ -434,6 +434,13 @@ void ExpertPool::diag(std::FILE* f) const {
 
 ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity affinity)
     : host_works_(host_works), affinity_(affinity), topo_(detect_cpu_topology(true, affinity)) {
+    // Capture the submitter's own affinity once, before any worker thread exists, so an asynchronous CPU
+    // submitter created later can restore the original allowed CPUs instead of a driver's single-core pin.
+#if defined(_WIN32)
+    submission_affinity_.valid = detail::get_thread_cpu_sets(submission_affinity_.cpu_sets);
+#else
+    submission_affinity_.valid = detail::get_thread_affinity(submission_affinity_.mask) == 0;
+#endif
     if (const char* e = std::getenv("STRATA_POOL_SPIN_US"))   // a test knob; see kSpinBeforeSleep
         spin_before_sleep_ = std::chrono::microseconds((std::max)(0, std::atoi(e)));
     if (n_workers > 0) {
@@ -622,6 +629,17 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             const int e = (int) i / parts_b_, part = (int) i % parts_b_;
             const int r0 = H * part / parts_b_, r1 = H * (part + 1) / parts_b_;
             s2_expert_down_rows(jobs_[e].blob, split_[(size_t) e].a2, jobs_[e].out, r0, r1);
+        } else if (mode_ == 7) {
+            // plan v0.3: the prefill stage's activation rows, spread over the pool. Each row keeps the
+            // kernel and the destination the submitting thread's serial loop used.
+            const ActRows& rows = *arows_;
+            for (int64_t t = (int64_t) i; t < rows.n_rows; t += mtasks_) {
+                if (rows.need[t] == 0) continue;
+                if (q2_native_kernels(nfmt_->gu_type))
+                    act_quant_any(rows.x + t * rows.n_embd, rows.n_embd, rows.actq[t]);
+                else
+                    native_quant_act(*nfmt_, rows.x + t * rows.n_embd, rows.nact + t * kNativeActBytes);
+            }
         } else if (mode_ >= 5) {
             // plan v0.3 P6: native layers, 5 = gate/up rows, 6 = down rows
             const int per = mode_ == 5 ? FF : H;
@@ -780,6 +798,17 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     multi_bytes += (int64_t) n * (int64_t) f.bytes;
     mode_ = 0;
     ms_drain_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void ExpertPool::quant_act_rows(const NativeFmt& f, const ActRows& rows) {
+    if (rows.n_rows <= 0) return;
+    const std::lock_guard<std::mutex> lock(native_batch_mutex_);
+    nfmt_ = &f;
+    arows_ = &rows;
+    mtasks_ = (int) std::min<int64_t>(3 * (n_ + (host_works_ ? 1 : 0)), rows.n_rows);
+    run_phase(7, mtasks_);
+    arows_ = nullptr;
+    mode_ = 0;
 }
 
 void ExpertPool::run(ExpertJob* jobs, int n) {

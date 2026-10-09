@@ -294,18 +294,19 @@ void qsa_set_kv_resident(int64_t cells);
 /// captured graphs stay valid.  Set before sizing and initializing the session and the drafter.
 void qsa_set_kv_elastic(bool enabled, int64_t init_cells);
 bool qsa_kv_elastic();
-/// Cells every elastic state can hold now (INT64_MAX when none is elastic).
-int64_t qsa_kv_elastic_cells();
-/// Chunks still to map for every elastic state to hold `cells` cells.
-int64_t qsa_kv_elastic_need(int64_t cells);
+/// Cells every elastic state on `device` can hold now (INT64_MAX when none is elastic).
+/// A device of -1 includes all pools for the read-only accounting functions.
+int64_t qsa_kv_elastic_cells(int device = -1);
+/// Chunks still to map on `device` for every elastic state to hold `cells` cells.
+int64_t qsa_kv_elastic_need(int device, int64_t cells);
 /// Maps them, each from `take()` (0: a new chunk), the new memory zeroed.  Synchronous; nothing may be running on
-/// the device.  false: out of memory.
-bool qsa_kv_elastic_grow(int64_t cells, const std::function<VmmChunk()>& take);
-/// Unmaps the chunks past `cells` cells, each handed to `give`.  Returns how many.
-int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>& give);
+/// the device.  The caller must select `device`.  false: out of memory.
+bool qsa_kv_elastic_grow(int device, int64_t cells, const std::function<VmmChunk()>& take);
+/// Unmaps the chunks past `cells` cells on `device`, each handed to `give`.  Returns how many.
+int64_t qsa_kv_elastic_shrink(int device, int64_t cells, const std::function<void(VmmChunk)>& give);
 /// Physical bytes the elastic pools hold, and what all of them would at the full context.
-uint64_t qsa_kv_elastic_mapped_bytes();
-uint64_t qsa_kv_elastic_full_bytes();
+uint64_t qsa_kv_elastic_mapped_bytes(int device = -1);
+uint64_t qsa_kv_elastic_full_bytes(int device = -1);
 int64_t qsa_kv_resident();
 /// The drafter's windowed ring for `qsa_state_bytes`/`qsa_state_init` is chosen by `ring_cells`, NOT by
 /// `qsa_kv_resident()`: the MTP layer attends only its last `ring_cells` cells, so it never needs the full

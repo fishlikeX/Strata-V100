@@ -18,6 +18,9 @@ bool vmm_available();
 uint64_t vmm_granularity();
 /// A new physical chunk on the current device (0: out of memory), and its release.
 VmmChunk vmm_chunk_new();
+/// A new physical chunk on an explicit device (0: out of memory, or no VMM there).  A range's chunks must come from
+/// the device the range was reserved on, even when the current device has changed since.
+VmmChunk vmm_chunk_new(int device);
 void vmm_chunk_free(VmmChunk h);
 
 class VmmRange {
@@ -27,16 +30,21 @@ public:
     VmmRange(const VmmRange&) = delete;
     VmmRange& operator=(const VmmRange&) = delete;
 
-    /// Reserves `bytes` (rounded up to whole chunks) of addresses, nothing mapped.
+    /// Reserves `bytes` (rounded up to whole chunks) of addresses on the current device, nothing mapped.  The
+    /// device and its granularity are captured here: every later map, access, unmap and release uses them, not the
+    /// ambient device (a second prefill stage runs on a different device).
     bool reserve(uint64_t bytes);
-    /// Unmaps and frees every chunk, then the addresses.
+    /// Unmaps and frees every chunk, then the addresses, on the device reserve() captured.
     void release();
+    /// The device this range was reserved on (-1 before reserve) and its allocation granularity (0 before reserve).
+    int device() const { return dev_; }
+    uint64_t granularity() const { return gran_; }
     uint8_t* base() const { return (uint8_t*) (uintptr_t) base_; }
     int64_t chunks() const { return (int64_t) h_.size(); }
     bool mapped(int64_t i) const { return i >= 0 && i < chunks() && h_[(size_t) i] != 0; }
     int64_t mapped_count() const;
-    /// Maps chunks [lo, hi) that are not mapped yet, each to `take()` or, when that returns 0, to a new chunk.
-    /// Readable and writable when it returns; false: out of memory (what was mapped stays mapped).
+    /// Maps chunks [lo, hi) that are not mapped yet, each to `take()` or, when that returns 0, to a new chunk on the
+    /// range's device.  Readable and writable when it returns; false: out of memory (what was mapped stays mapped).
     template <class Take> bool map_range(int64_t lo, int64_t hi, Take take);
     /// Unmaps chunk i and hands back its physical chunk (0 when it was not mapped).
     VmmChunk unmap(int64_t i);
@@ -48,6 +56,8 @@ private:
     /// chunk counts as mapped without access.
     bool commit_run(int64_t lo, int64_t hi);
     unsigned long long base_ = 0;
+    int dev_ = -1;             // the device reserve() captured; map/access/unmap/release never consult the ambient one
+    uint64_t gran_ = 0;        // that device's allocation granularity (it is per device, not a process constant)
     std::vector<VmmChunk> h_;   // per chunk: its physical chunk, 0 = unmapped
 };
 
@@ -62,7 +72,7 @@ template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take
             continue;
         }
         VmmChunk h = take();
-        if (h == 0) h = vmm_chunk_new();
+        if (h == 0) h = vmm_chunk_new(dev_);
         if (h == 0 || !map_one(i, h)) {
             if (h != 0) vmm_chunk_free(h);
             if (run >= 0) commit_run(run, i);
