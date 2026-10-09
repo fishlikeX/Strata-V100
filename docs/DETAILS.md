@@ -921,7 +921,15 @@ answers keep coming, slower; growing back puts the same experts in the same slot
 Not with the helper caches, `--peer-device` or the resident low-RAM mode.  Measured on an RTX 5070
 12 GB with Q2_0 (4.8 GiB cache): `{"reserve_mib": 6000}` took 78 ms and freed 4.3 GiB (the cache keeps 0.5 GiB for
 the prompt path), decode 44 -> 33 tok/s; growing back took 92 ms and the answers were token for token the ones before
-the shrink.  Without the flag nothing changes (the same answers as without it).
+the shrink. The segmented-cache behavior requires `--vram-elastic`.
+
+GPU-only KV growth also supports `POST /v1/vram`, without `--vram-elastic`. This mode releases whole physical
+chunks from each GPU's expert cache. It keeps the KV mappings, cache addresses, and prompt-loan region fixed.
+After an external allocation is released, `{"reserve_mib": null}` maps available chunks back and fills the
+new slots from the expert profile. It keeps the startup VRAM reserve on each GPU. Memory still used by KV
+cannot return to the expert cache until the KV pools shrink. A requested reserve can fail if the remaining
+cache chunks cannot supply enough memory.
+
 
 **Keep what the expert cache learned across restarts (opt-in, engine 0.1.36, #477):** a start fills the GPU's expert
 cache from the shipped profile, and the adaptive tier (`--adapt-every`) then moves in the experts your requests use.
@@ -1693,7 +1701,8 @@ A picture becomes up to 1,024 tokens of the context (a 640x480 photo: 300). The 
 do on every turn, is encoded only once.
 
 **Lazy vision (the encoder's VRAM goes to the expert caches until a picture arrives):** add `"lazy": true` to the
-`"vision"` section of `strata-<model>.json` (with `"vram_elastic": true` in the config, and without `"parallel"`).
+`"vision"` section of `strata-<model>.json`. Use GPU-only KV growth with `"vram_elastic": false`, or use
+`"vram_elastic": true` without GPU-only KV growth. Do not enable batch inference for lazy vision.
 The encoder then does not start at startup: the ~1.4 GB of VRAM it would hold stays with the expert caches, so text
 runs without the small vision penalty.  The first image request gives that VRAM back - the engine's `VRAM` command
 takes one reserve per GPU - and starts the encoder; `"vram_mib"` sets how much per GPU (`[1700, 600]` for a layer
@@ -1701,22 +1710,23 @@ split, or `[1800]` for one GPU; the defaults match this model's encoder).  After
 request the encoder stops and the VRAM goes back to the caches (its encoded pictures stay cached on disk).  The
 first picture after an idle gap answers a few seconds later, so the encoder can start again.
 
-**GPU vision with GPU-only KV growth:** Set `"lazy": false` in the `"vision"` section and keep
-`"vram_elastic": false` in the main configuration. Remove `"idle_s"` from the vision section.
-The server starts the GPU image encoder before the text engine. The text engine then sizes its expert
-caches with the image encoder already in GPU memory. Image requests do not need the `VRAM` command.
-The encoder stays loaded between requests, so the expert caches have less memory for text requests.
+**Lazy GPU vision with GPU-only KV growth:** Keep `"vram_elastic": false` in the main configuration.
+Set `"gpu": true`, `"lazy": true`, and `"idle_s": 900` in the `"vision"` section. The encoder loads on an
+image request and unloads after 900 idle seconds. The runtime releases expert-cache chunks before the
+encoder starts. When the encoder stops, the runtime restores available cache chunks and fills their
+slots from the expert profile. The image embeddings remain cached on disk.
 
-Do not enable `"vram_elastic": true` to repair this configuration. Elastic expert-cache allocation disables
-GPU-only KV growth. Lazy GPU vision with elastic VRAM disabled fails on the first uncached image with
-`VRAM needs an engine started with --vram-elastic`. Use resident GPU vision to keep image support and
-GPU-only KV growth together.
+This path uses the same per-GPU controller as KV growth. It does not shrink live KV state or move the
+prompt buffers. Do not enable `"vram_elastic": true` for this path: segmented expert-cache allocation
+disables GPU-only KV growth.
 
-The dual-V100 IQ3_S service was checked with this configuration. An image request returned HTTP 200 and
-correctly identified a red square on the left and a blue square on the right. A separate conversation
-screenshot request returned HTTP 200 and correctly summarized the staging deployment target and the
-requirement to keep image support enabled. The engine log confirmed GPU-only KV growth on both GPUs
-with a logical context of 524,288 cells. These checks did not measure long-context image throughput.
+The dual-V100 IQ3_S service was checked with a five-second vision idle timeout. GPU process observations
+confirmed that the encoder started for an image request, exited after the idle timeout, and started again
+for another image. Both image requests returned correct answers. A conversation screenshot with 27,978
+prompt tokens returned the correct summary while both GPUs' KV pools grew to 32,768 cells. A subsequent
+short text request trimmed both pools to 8,192 cells. The prompt chunk remained 8,192 tokens throughout
+the VRAM transitions. The service was then returned to the 900-second idle timeout. These checks did not
+exercise the full 524,288-token context.
 
 **More image tokens (0.1.39, #625):** `--vision-tokens N` at setup (`START-HERE.bat --setup --vision cpu
 --vision-tokens 768`) sets the most tokens a picture becomes - `"max_tokens"` in the `"vision"` section of
