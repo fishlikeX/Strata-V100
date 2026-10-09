@@ -2677,8 +2677,8 @@ class Service:
     def vram(self, reserve_mib: int | list | None) -> dict:
         """#533, POST /v1/vram: keep `reserve_mib` of VRAM free for other programs - one number, or a list with one
         per GPU for a layer split (None: the reserve the engine started with), applied between requests - a request
-        that is running finishes first (up to wait_s).  Only an engine started with --vram-elastic (the config's
-        "vram_elastic": true) can do it; it never resizes on its own.  An unloaded engine applies it when it loads.
+        that is running finishes first (up to wait_s). Requires --vram-elastic or GPU-only KV growth; it never
+        resizes on its own. An unloaded engine applies it when it loads.
         -> {"status": ..., and the engine's figures}."""
         if not hasattr(self.engine, "vram"):
             raise ValueError("this engine cannot resize its VRAM use")
