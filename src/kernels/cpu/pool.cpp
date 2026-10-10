@@ -39,6 +39,67 @@ HostCore host_core_setting() { return (HostCore) g_host_core.load(); }
 
 static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affinity);
 
+#if !defined(_WIN32)
+// A sysfs cpulist ("0-7,16").  `thread_siblings_list` (below) and the hybrid PMU's CPU sets both use this
+// format, so the topology detection and the overflow placement share one reader.
+static bool read_cpulist(const char* path, std::vector<int>& out) {
+    std::FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char text[1024] = {0};
+    const size_t n = std::fread(text, 1, sizeof text - 1, f);
+    std::fclose(f);
+    text[n] = '\0';
+    for (const char* p = text; *p;) {
+        char* end = nullptr;
+        const long lo = std::strtol(p, &end, 10);
+        if (end == p) break;
+        long hi = lo;
+        if (*end == '-') {
+            p = end + 1;
+            hi = std::strtol(p, &end, 10);
+        }
+        for (long c = lo; c <= hi && c < 4096; ++c) out.push_back((int) c);
+        p = end;
+        while (*p == ',' || *p == ' ' || *p == '\n')  ++p;
+    }
+    return !out.empty();
+}
+
+// **WHERE A WORKER BEYOND THE PHYSICAL CORES RUNS.**  `worker_cores` holds one logical processor per physical
+// core, so `--pool-workers N` with N above the core count leaves N - cores workers unpinned: the OS places
+// them, they migrate, and one can land on the host's core or on a logical processor a pinned worker already
+// owns - two of the pool's threads then share one logical processor while another sits idle, so a sweep of
+// requested thread counts measures the OS's placement, not the thread count.  The extras are instead pinned to
+// the SMT siblings of the worker cores, in the workers' order, one thread per logical processor; the host
+// core's own sibling comes LAST, so an extra worker shares the host's physical core only once every worker
+// sibling is taken.  A CPU outside the process's allowed set, and any CPU a worker or the host already holds,
+// is skipped: a hybrid CPU's worker list already contains SMT siblings, so nothing is added there, and a
+// container's mask is respected.  Empty - as on Windows, which keeps the previous placement - leaves the
+// extras unpinned, exactly as they were.
+static void detect_overflow_cores(CpuTopology& topo) {
+    std::vector<unsigned long> mask;
+    std::vector<int> allowed;
+    if (detail::get_thread_affinity(mask, &allowed) != 0)
+        for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) allowed.push_back((int) i);
+    std::sort(allowed.begin(), allowed.end());
+    auto add_siblings = [&](int cpu) {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+        std::vector<int> siblings;
+        if (!read_cpulist(path, siblings)) return;
+        for (int s : siblings) {
+            if (s == cpu || s == topo.host_core) continue;
+            if (!std::binary_search(allowed.begin(), allowed.end(), s)) continue;
+            if (std::find(topo.worker_cores.begin(), topo.worker_cores.end(), s) != topo.worker_cores.end()) continue;
+            if (std::find(topo.overflow_cores.begin(), topo.overflow_cores.end(), s) != topo.overflow_cores.end()) continue;
+            topo.overflow_cores.push_back(s);
+        }
+    };
+    for (int cpu : topo.worker_cores) add_siblings(cpu);
+    if (topo.host_core >= 0) add_siblings(topo.host_core);
+}
+#endif
+
 CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity) {
     CpuTopology topo = detect_cpu_topology_impl(skip_first, affinity);
     // --host-core last: the host takes the last core, the workers the others (the first included)
@@ -49,6 +110,9 @@ CpuTopology detect_cpu_topology(bool skip_first, PoolAffinity affinity) {
         topo.worker_cores.insert(topo.worker_cores.begin(), topo.host_core);
         topo.host_core = last;
     }
+#if !defined(_WIN32)
+    detect_overflow_cores(topo);
+#endif
     return topo;
 }
 
@@ -202,30 +266,6 @@ static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affini
         return v;
     };
 
-    // #798: a cpulist ("0-7,16") of one of the hybrid PMU's CPU sets: /sys/devices/cpu_core/cpus and cpu_atom/cpus
-    auto cpulist_read = [](const char* path, std::vector<int>& out) -> bool {
-        std::FILE* f = std::fopen(path, "r");
-        if (!f) return false;
-        char text[1024] = {0};
-        const size_t n = std::fread(text, 1, sizeof text - 1, f);
-        std::fclose(f);
-        text[n] = '\0';
-        for (const char* p = text; *p;) {
-            char* end = nullptr;
-            const long lo = std::strtol(p, &end, 10);
-            if (end == p) break;
-            long hi = lo;
-            if (*end == '-') {
-                p = end + 1;
-                hi = std::strtol(p, &end, 10);
-            }
-            for (long c = lo; c <= hi && c < 4096; ++c) out.push_back((int) c);
-            p = end;
-            while (*p == ',' || *p == ' ' || *p == '\n')  ++p;
-        }
-        return !out.empty();
-    };
-
     std::vector<int> allowed;
     std::vector<unsigned long> allowed_mask;
     if (detail::get_thread_affinity(allowed_mask, &allowed) != 0) {
@@ -269,8 +309,8 @@ static CpuTopology detect_cpu_topology_impl(bool skip_first, PoolAffinity affini
     // P-cores a slightly higher capacity (1024 against 1012 on a Core Ultra 7 270K Plus): "capacity == the maximum"
     // counted 2 of its 8 P-cores and started 1 pool worker.
     std::vector<int> pmu_core, pmu_atom;
-    const bool pmu = cpulist_read("/sys/devices/cpu_core/cpus", pmu_core) &&
-                     cpulist_read("/sys/devices/cpu_atom/cpus", pmu_atom);
+    const bool pmu = read_cpulist("/sys/devices/cpu_core/cpus", pmu_core) &&
+                     read_cpulist("/sys/devices/cpu_atom/cpus", pmu_atom);
     auto is_e = [&](const CoreLinux& cl) {
         if (pmu) return std::find(pmu_atom.begin(), pmu_atom.end(), cl.cpu) != pmu_atom.end();
         return max_cap > 0 && cl.cap > 0 && cl.cap * 10 < max_cap * 9;
@@ -461,12 +501,21 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     split_multi_.resize((size_t) kMaxSplitMulti);
     threads_.reserve((size_t) n_);
     for (int i = 0; i < n_; ++i) {
-        const int core = pin ? (i < (int) topo_.worker_cores.size() ? topo_.worker_cores[(size_t) i] : -1) : -1;
+        // `worker_cpu` hands out the physical cores first and only then the SMT siblings, so a pool no larger
+        // than the core count is placed exactly as it always was (see the header).
+        const int core = pin ? worker_cpu(i) : -1;
         threads_.emplace_back([this, i, core] {
             pin_this_thread(core, i);
             worker(i);
         });
     }
+}
+
+int ExpertPool::worker_cpu(int i) const {
+    if (i < 0) return -1;
+    if (i < (int) topo_.worker_cores.size()) return topo_.worker_cores[(size_t) i];
+    const size_t o = (size_t) i - topo_.worker_cores.size();
+    return o < topo_.overflow_cores.size() ? topo_.overflow_cores[o] : -1;
 }
 
 ExpertPool::~ExpertPool() {

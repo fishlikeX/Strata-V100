@@ -50,11 +50,16 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
                 }
             }
         }
-        const float dx = h2f(u16(blk)) * Fmt32<TY>::K;
+        // ggml-cpu's reference for these formats scales the reduced sum by K, not the per-block d
+        // (arch/x86/quants.c: `*s = 0.25f * hsum_float_8(accumf)`), so K is applied at the end below.  Folding it
+        // into d is exact only while the products stay normal; a subnormal product or a partial overflow rounds
+        // differently, so the placement has to match ggml literally.  The other formats keep their K in d.
+        const float dx = ggml_hsum<TY>() ? h2f(u16(blk)) : h2f(u16(blk)) * Fmt32<TY>::K;
         for (int t = 0; t < NT; ++t)
             accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * y[t][i].d), _mm256_cvtepi32_ps(acci[t]), accf[t]);
     }
-    for (int t = 0; t < NT; ++t) res[t] = hsum8(accf[t]);
+    for (int t = 0; t < NT; ++t)
+        res[t] = ggml_hsum<TY>() ? Fmt32<TY>::K * hsum8_ggml(accf[t]) : hsum8(accf[t]);
 }
 
 // ---- IQ2_XS (17) with ggml's vectorized sign decode (arch/x86/quants.c, ggml_vec_dot_iq2_xs_q8_K):

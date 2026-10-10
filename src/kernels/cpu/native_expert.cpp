@@ -105,13 +105,26 @@ int native_gu_mt_min(int gu_type) {
     // Opt-in (STRATA_IQ3S_MT1=1): it changes a lone token's IQ3_S rounding on those CPUs, so the default stays 0.1.39's.
     static const bool iq3s_one = env == nullptr && std::getenv("STRATA_IQ3S_MT1") != nullptr && cpu_avx2_ok() && std::getenv("STRATA_NO_IQ256") == nullptr &&
                                  !cpu_avx512_ok() && iq256_gather_setting() != 0 && cpu_gather_fast();
-    return iq3s_one && gu_type == 21 ? 1 : mt_min;
+    // On a pure-AVX-2 CPU (AVX2 but no AVX-512, no AVX-VNNI) the AVX-2 kernel's ONE-token rows now beat ggml-cpu's
+    // vec_dot for IQ3_XXS, IQ3_S and IQ2_S too, and in decode most CPU experts serve one token of the window.  The
+    // rows reduce in ggml's own order and scale by K as ggml does (iq_avx2.cpp, hsum8_ggml; iq_avx2_rows.inl), so
+    // a lone token's rows are ggml's bit for bit and they no longer depend on the drafting.  Measured on a Ryzen
+    // 3600 (an expert's gate/up rows, one token: IQ2_S 0.209 vs ggml 0.240 ms, IQ3_XXS 0.350 vs 0.370, IQ3_S 0.328
+    // vs 0.544).  A machine-wide rule, not per-core.
+    // Every probe is in expert_layout.cpp and cpu_avx2_ok() comes first, so no AVX2 code runs before the check.
+    // STRATA_IQ_MT_MIN set keeps its rule (env == nullptr above).
+    static const bool avx2_nt1 = env == nullptr && cpu_avx2_ok() && !cpu_avx512_ok() && !cpu_avxvnni_ok() &&
+                                 std::getenv("STRATA_NO_IQ256") == nullptr;
+    if (iq3s_one && gu_type == 21) return 1;
+    if (avx2_nt1 && (gu_type == 18 || gu_type == 21 || gu_type == 22)) return 1;
+    return mt_min;
 }
 
 void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff,
                     int r0, int r1) {
-    // the multi-token kernels decode the weights once for all tokens: 2.0-2.4x ggml-cpu at three tokens, no faster
-    // at one (all are bound by the codebook lookups, ~5 GB/s per core), measured by native_expert_parity.  AVX-512
+    // the multi-token kernels decode the weights once for all tokens: 2.0-2.4x ggml-cpu at three tokens, and no
+    // faster at one for most formats (all are bound by the codebook lookups, ~5 GB/s per core) - except IQ3_XXS,
+    // IQ3_S and IQ2_S on a pure-AVX-2 CPU, see native_gu_mt_min - measured by native_expert_parity.  AVX-512
     // first, then the AVX-2 one (Zen 2/3, Intel 12th-14th gen).  STRATA_NO_IQ512 drops an AVX-512 CPU to the
     // AVX-2 kernel, STRATA_NO_IQ256 drops the AVX-2 kernel; ggml-cpu's single-token vec_dot is reached only with
     // both set (and on a CPU without AVX-512, STRATA_NO_IQ512 changes nothing).

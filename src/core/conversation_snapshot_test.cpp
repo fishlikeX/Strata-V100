@@ -149,6 +149,31 @@ void full_session(int fmt, int mode, int experts) {
     SavedConversation a,b,restored;
     check(conversation_snapshot_save(a,view,ss,g,draft.state,err),"capture complete A");
     check(a.checkpoints[0].used == 17,"upstream checkpoint LRU stamp survives capture");
+    for (int64_t base : {0, 3, 4, 63, 64, 65}) {
+        SavedConversation direct, captured;
+        check(conversation_disk_delta_save(direct,view,ss,g,&draft.state,base,err),"capture reference disk delta");
+        check(conversation_disk_delta_from_snapshot(captured,a,base,true,err),"derive disk delta from RAM image");
+        check(captured.live.ids==direct.live.ids && captured.live.imgs==direct.live.imgs &&
+              captured.live.gdn==direct.live.gdn && captured.live.ple==direct.live.ple &&
+              captured.live.tails==direct.live.tails && captured.live.dead==direct.live.dead &&
+              captured.live.block_pos==direct.live.block_pos && captured.geometry==direct.geometry &&
+              captured.layer_lo==direct.layer_lo && captured.layer_hi==direct.layer_hi &&
+              captured.cvec==direct.cvec && captured.checkpoints.size()==direct.checkpoints.size(),
+              "captured delta preserves token slice and complete running state");
+        for (size_t i=0;i<direct.checkpoints.size();++i)
+            check(captured.checkpoints[i].ids==direct.checkpoints[i].ids &&
+                  captured.checkpoints[i].gdn==direct.checkpoints[i].gdn &&
+                  captured.checkpoints[i].used==direct.checkpoints[i].used,
+                  "captured delta preserves new checkpoint state and LRU stamp");
+        check(captured.kv.size()==direct.kv.size(),"captured delta contains all main and draft K/V layers");
+        for (size_t i=0;i<direct.kv.size();++i)
+            check(equal(captured.kv[i],direct.kv[i]) &&
+                  captured.kv[i].first_units==direct.kv[i].first_units &&
+                  captured.kv[i].format==direct.kv[i].format &&
+                  captured.kv[i].cells==direct.kv[i].cells &&
+                  captured.kv[i].pooled_rows==direct.kv[i].pooled_rows,
+                  "captured delta matches GPU tail bytes at page, pooled-row and draft boundaries");
+    }
     fill(177);
     check(conversation_snapshot_save(b,view,ss,g,draft.state,err),"capture complete B");
     {

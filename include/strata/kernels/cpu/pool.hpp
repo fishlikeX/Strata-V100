@@ -78,6 +78,11 @@ struct CpuTopology {
     int e_cores = 0;                ///< Efficient cores
     std::vector<int> worker_cores;  ///< Ordered CPU IDs; on Windows, group * 64 + processor within the group
     int host_core = -1;             ///< Logical core reserved for host thread
+    /// SMT siblings of `worker_cores`, in the same order, with the host core's own sibling last: where a
+    /// pool asked for MORE workers than there are physical cores pins the extras (see `ExpertPool::worker_cpu`).
+    /// Empty where the topology cannot name the siblings (Windows today, a container without sysfs): an extra
+    /// worker is then unpinned, which is what every extra worker did before this list existed.
+    std::vector<int> overflow_cores;
 };
 
 /// Which core the host thread - the layer loop that spins on the GPU's flags - takes when `skip_first` reserves one
@@ -156,6 +161,12 @@ public:
     ExpertPool& operator=(const ExpertPool&) = delete;
 
     int workers() const { return n_; }
+    /// The logical processor worker `i` is pinned to: `worker_cores[i]` while there is a physical core, then
+    /// `overflow_cores[i - worker_cores.size()]` (an SMT sibling: one pool thread per logical processor), and
+    /// -1 - the OS places it - once both lists are exhausted.  A pool of `worker_cores.size()` workers or
+    /// fewer therefore lands exactly where it did before `overflow_cores` existed.  Reported at startup so a
+    /// --pool-workers sweep can be read back: which CPU each worker actually took, not just how many were asked.
+    int worker_cpu(int i) const;
     /// Whether the host thread also drains.  Reported at startup, because "the engine adapts to the machine it
     /// is on" is only true if the engine says which adaptation it took.
     bool host_works() const { return host_works_; }

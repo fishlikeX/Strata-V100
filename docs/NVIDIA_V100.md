@@ -88,7 +88,41 @@ and `STRATA_PREFILL_STREAM_MIN=3072` select CPU-assisted staging below
 3,072 tokens. The larger-chunk option can change prompt rounding.
 Do not enable it for batch slots or assume the same gain on other models.
 
+**Retained CPU and Volta changes.** These changes keep the model formats, the
+int8 KV cache at a 524,288-token context, vision, MTP, the L2/L3 conversation
+tiers and the NVMe-backed n-gram table. No 20% end-to-end gain is proved yet,
+and no performance guarantee follows.
+
+On sm_70 the prompt path's QSA top-k may use the active-block bound of a
+prefill. The bound selects the register kernel when the prompt's active blocks
+fit it, even when a long context capacity makes the score-row stride large.
+Decode and captured graphs pass no bound and keep the capacity rule.
+
+On a CPU with AVX2, no AVX-512 and no AVX-VNNI, the AVX-2 expert kernel serves
+IQ3_XXS, IQ3_S and IQ2_S rows for one token (NT1) by default. NT means the
+tokens in one group; NT1 is a group of one token. The IQ3_S and IQ2_S decodes
+use 32-bit loads to read packed index bytes, which shortens the grid assembly.
+These rows reduce in ggml's own float order and apply the format normalization
+factor after the reduction, so a row is ggml's dot product bit for bit,
+including subnormal products. IQ4_NL down rows are unchanged. An explicit
+`STRATA_IQ_MT_MIN` keeps its rule.
+
+After each non-host physical core has a worker, the pool pins additional
+workers to the allowed SMT siblings of the worker cores. SMT (simultaneous
+multithreading) means a physical core's second logical processor. The host
+core's sibling comes last. The default placement is unchanged: five workers and
+the host thread on the measured six-core CPU.
+
 See the [release selection](../improvements/RELEASE-v0.1.41-V100.md)
 and [prefill/decode measurements](../benchmarks/v100-iq3_s-v0141-2026-10-08.md).
 The options do not change an installed service until its environment and
 engine are changed. Do not enable stage-buffer pinning for IQ3_S.
+
+## Shared-root return latency
+
+The dual-V100 protected study measures repeat shared-root HTTP latency
+at 1,799.7 ms before the cache changes and 902.6 ms after them.
+The engine retains a disk-restored root in the bounded RAM cache.
+The unrelated small-chat and live-continuation cases do not improve
+in this sample. Do not treat this result as a general throughput gain.
+See the [agentic latency measurements](../benchmarks/v100-iq3_s-prefill-wmma.md#agentic-short-turn-latency-2026-10-10).

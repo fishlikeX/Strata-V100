@@ -37,6 +37,13 @@ void check(bool ok, const char* what) {
 int main() {
     std::printf("conv_cache_test\n");
     {
+        using strata::program::conv_cache::retained_kv_cells;
+        check(retained_kv_cells(8192, 40960, 29999) == 40960, "an active burst retains its K/V high-water mark");
+        check(retained_kv_cells(8192, 40960, 30000) == 8192, "idle deadline returns surplus K/V to experts");
+        check(retained_kv_cells(8192, 131072, 0) == 65536, "retained surplus is bounded to 64K cells");
+        check(retained_kv_cells(131072, 40960, 0) == 131072, "retention never reduces the current request extent");
+    }
+    {
         const std::vector<uint64_t> stamps = {1, 2, 3, 4, 5, 6, 7};   // chat A: root + six turns, one over
         check(eviction_victim(stamps.data(), stamps.size(), 6) == 1,
               "over budget with fresh stamps: the oldest leaf leaves (the FIFO it was)");

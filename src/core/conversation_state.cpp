@@ -499,6 +499,70 @@ bool conversation_disk_delta_save(SavedConversation& out, const ConversationView
     return true;
 }
 
+bool conversation_disk_delta_from_snapshot(SavedConversation& out, const SavedConversation& image,
+                                           int64_t first_token, bool has_draft, std::string& error) {
+    if (first_token < 0 || (uint64_t) first_token > image.live.ids.size() ||
+        (has_draft && image.kv.empty()))
+        return fail(error, "invalid captured delta base");
+    out = {};
+    out.geometry = image.geometry;
+    out.layer_lo = image.layer_lo;
+    out.layer_hi = image.layer_hi;
+    out.cvec = image.cvec;
+    out.live.ids.assign(image.live.ids.begin() + first_token, image.live.ids.end());
+    for (const auto& key : image.live.imgs)
+        if (key.start >= first_token) out.live.imgs.push_back(key);
+    out.live.gdn = image.live.gdn;
+    out.live.ple = image.live.ple;
+    out.live.tails = image.live.tails;
+    out.live.dead = image.live.dead;
+    out.live.block_pos = image.live.block_pos;
+    for (const auto& c : image.checkpoints)
+        if ((int64_t) c.ids.size() > first_token) out.checkpoints.push_back(c);
+    out.kv.resize(image.kv.size());
+    const auto shapes = strata::kernels::qsa_real_shapes();
+    for (size_t j = 0; j < image.kv.size(); ++j) {
+        const auto& src = image.kv[j];
+        auto& dst = out.kv[j];
+        if (src.cells < 0 || src.page_size <= 0 || src.idx_dim < 0 ||
+            std::any_of(src.first_units.begin(), src.first_units.end(), [](int64_t x) { return x != 0; }))
+            return fail(error, "delta source is not a full K/V image");
+        const bool draft = has_draft && j + 1 == image.kv.size();
+        const int64_t first = draft ? std::max<int64_t>(0, first_token - 1) : first_token;
+        const int64_t cells = first / src.page_size * src.page_size;
+        dst.format = src.format;
+        dst.cells = src.cells;
+        dst.heads = src.heads;
+        dst.head_dim = src.head_dim;
+        dst.page_size = src.page_size;
+        dst.pooled_rows = src.pooled_rows;
+        dst.idx_dim = src.idx_dim;
+        dst.first_units = {cells, cells, cells, cells, draft ? 0 : first / shapes.idx_block};
+        const std::array<const ConversationBuffer*, 5> from =
+            {&src.k, &src.v, &src.k_scale, &src.v_scale, &src.pooled};
+        const std::array<ConversationBuffer*, 5> to =
+            {&dst.k, &dst.v, &dst.k_scale, &dst.v_scale, &dst.pooled};
+        for (size_t p = 0; p < from.size(); ++p) {
+            size_t keep = 0;
+            if (p == 4) {
+                if (!product(keep, {(uint64_t) dst.first_units[p], (uint64_t) src.idx_dim, 4}))
+                    return fail(error, "captured pooled tail overflow");
+            } else if (src.cells > 0) {
+                if (from[p]->size() % (size_t) src.cells ||
+                    !product(keep, {from[p]->size() / (size_t) src.cells, (uint64_t) cells}))
+                    return fail(error, "captured K/V tail overflow");
+            }
+            if (keep > from[p]->size()) return fail(error, "invalid captured tail size");
+            to[p]->resize(from[p]->size() - keep);
+            if (!to[p]->visit(0, to[p]->size(), [&](uint8_t* data, size_t n, size_t at) {
+                    return from[p]->read(data, keep + at, n);
+                }))
+                return fail(error, "invalid captured tail buffer");
+        }
+    }
+    return true;
+}
+
 // the draft layer's K/V included (the stage that owns the draft head, or no layer split)
 bool conversation_snapshot_bytes(const ConversationView& view, const SessionState& ss, const ModelGeometry& g,
                                  const QsaState& draft, size_t& bytes, std::string& error) {

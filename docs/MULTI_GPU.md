@@ -119,6 +119,41 @@ byte-identical, and automatic sharing can vary between runs. The default stays
 off. See the [measurement and ownership report](../benchmarks/v100-multi-gpu-cpu-prefill-2026-10-07.md)
 for the regression, overlap, cancellation, and service checks.
 
+**Retained CPU-pool changes.** The pool keeps the model formats, the int8 KV
+cache at a 524,288-token context, vision, MTP, the L2/L3 conversation tiers and
+the NVMe-backed n-gram table. No 20% end-to-end gain is proved yet, and no
+performance guarantee follows.
+
+On a CPU with AVX2, no AVX-512 and no AVX-VNNI, the AVX-2 expert kernel serves
+IQ3_XXS, IQ3_S and IQ2_S rows for one token (NT1) by default. NT means the
+tokens in one group; NT1 is a group of one token. The IQ3_S and IQ2_S decodes
+use 32-bit loads to read packed index bytes. These rows reduce in ggml's own
+float order and apply the format normalization factor after the reduction, so a
+row is ggml's dot product bit for bit, including subnormal products. IQ4_NL down
+rows are unchanged. An explicit `STRATA_IQ_MT_MIN` keeps its rule.
+
+After each non-host physical core has a worker, the pool pins additional
+workers to the allowed SMT siblings of the worker cores. SMT (simultaneous
+multithreading) means a physical core's second logical processor. The host
+core's sibling comes last, so an additional worker shares the host's physical
+core only after every worker sibling is taken. The default placement is
+unchanged.
+
+**L3 background-writer affinity.** The two asynchronous NVMe park writers, the
+conversation delta park and the L3 root-prefix park, restore the allowed CPUs at
+the start of the writer thread, because a new thread inherits the serving
+thread's pin to the reserved host core (the first physical core, logical
+processor 0). The pool captures the allowed CPUs at construction, before that
+pin; each writer, created later on the pinned thread, captures a copy and
+restores it at entry. The GPU host thread stays pinned. The L2 parking, the
+snapshot format, the FNV hash, the disk budgets and the order of the future
+writes are unchanged. A strace smoke on two NVMe conversation files: the old
+writer inherits mask [0] with no restore. Each new writer restores [0..11]
+before its file open. Each restore returns 0 on the measured machine (six cores, 12
+threads). The RAM A/B/A reuse was 4615 of 4620 tokens in both arms. The trace
+is not timing evidence. The matched HTTP study does not meet the 20% target.
+See the [CPU and SSD study](../benchmarks/v100-iq3_s-prefill-wmma.md#cpu-and-ssd-study-2026-10-10).
+
 
 **The idle card can help one-chunk prompts (opt-in, `STRATA_PREFILL_HELP=1`).** A prompt that fits one chunk runs the stages one after the other, so while
 one card reads its layers the other idles. With it on, each stage hands a share of its streamed experts to the idle card: it
@@ -194,7 +229,19 @@ already reads chunk c+1. Conversation checkpoints save and restore every card's 
 into the card that owns the layer.
 
 The opt-in conversation cache disk store (`--conversation-cache-disk`) saves that state in files: one record per
-conversation, with one image per stage. It accepts `--layer-split`, unlike the host-RAM conversation cache.
+conversation, with one image per stage. Both the disk and host-RAM caches support `--layer-split`.
+
+A validated shared root restored from disk can retain all stage images
+in the bounded RAM cache. Each stage is validated before restore.
+The draft K/V stays with the last stage. A later RAM restore keeps
+the pinned root for another chat. The RAM budget, slot limit, and
+physical-RAM floor still apply.
+
+When both tiers park a conversation, the disk delta can use the existing
+RAM snapshot instead of another GPU read-back. Each disk payload keeps
+its own storage. Store accesses still wait for the pending writer.
+The measured [dual-V100 shared-root study](../benchmarks/v100-iq3_s-prefill-wmma.md#agentic-short-turn-latency-2026-10-10)
+reports the gains and the cases that do not improve.
 
 ## Limits (for now)
 

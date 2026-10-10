@@ -43,7 +43,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
                                                    ///< the same contract as qsa_block_scores's). The register kernel is
                                                    ///< chosen by this, not by the capacity max_blocks (a long
                                                    ///< --max-context otherwise sends every short prompt to the slow one).
-                                                   ///< CUDA uses the bound only on sm_75; HIP keeps its existing policy.
+                                                   ///< CUDA uses the bound on sm_70/sm_75; HIP keeps its existing policy.
                                                    ///< Omit it for captured graphs whose context can grow after capture.
 /// The same ids on a thread-block cluster of 8 CTAs per query (sm_90+, CUDA; S19). qsa_block_topk takes it for calls
 /// of up to 16 queries unless STRATA_QSA_CLUSTER=0. False (nothing launched) where it cannot run: HIP, a card or a
