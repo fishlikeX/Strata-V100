@@ -94,7 +94,16 @@ void append(const Pools& pl, const int32_t* table, const int32_t* step, const fl
 
 void append_batch(const Pools& pl, const int32_t* table, const int32_t* steps, const float* kc, const float* vc,
                   int64_t n, const k::QsaShapes& s, int fmt, const k::KvHostPools* host) {
-    if (fmt == k::kKvQ4) k::kv_append_q4_batch(pl.p.k_q4, pl.p.v_q4, table, steps, kc, vc, n, s, nullptr, host);
+    // k8v4 had no branch here, so the hybrid format fell through to the fp16 kernel with a null k_pool:
+    // an illegal memory access, and the batch-vs-step check never compared anything.  Same folding as
+    // append() above - each half onto its own pool, the host copy by halves.
+    if (fmt == k::kKvHybrid) {
+        const k::KvHostPools hk = host ? k::kv_hybrid_k_half(*host) : k::KvHostPools{},
+                             hv = host ? k::kv_hybrid_v_half(*host) : k::KvHostPools{};
+        k::kv_append_q8_batch(pl.p.k_q, pl.p.k_q, pl.p.k_scale, pl.p.k_scale, table, steps, kc, kc, n, s, nullptr,
+                              host ? &hk : nullptr);
+        k::kv_append_q4_batch(pl.p.v_q4, pl.p.v_q4, table, steps, vc, vc, n, s, nullptr, host ? &hv : nullptr);
+    } else if (fmt == k::kKvQ4) k::kv_append_q4_batch(pl.p.k_q4, pl.p.v_q4, table, steps, kc, vc, n, s, nullptr, host);
     else if (fmt == k::kKvInt8)
         k::kv_append_q8_batch(pl.p.k_q, pl.p.v_q, pl.p.k_scale, pl.p.v_scale, table, steps, kc, vc, n, s, nullptr, host);
     else k::kv_append_batch(pl.p.k_pool, pl.p.v_pool, table, steps, kc, vc, n, s, nullptr, host);
@@ -267,6 +276,14 @@ bool run(int fmt) {
                 if (fmt == k::kKvQ4) {
                     const size_t bb = rows * k::kv_q4_bytes_per_head((int) D6);
                     ck(cudaMemset(p2.k_q4, 0, bb), "zero"); ck(cudaMemset(p2.v_q4, 0, bb), "zero");
+                } else if (fmt == k::kKvHybrid) {
+                    // k8v4: INT8 K (codes + fp16 scales) and Q4_0 V.  Without this branch the format fell
+                    // through to the fp16 one below and memset a null k_pool: cudaMemset(NULL) is
+                    // cudaErrorInvalidValue, so the hybrid stage died before comparing anything.
+                    const size_t bb = rows * k::kv_q4_bytes_per_head((int) D6);
+                    ck(cudaMemset(p2.k_q, 0, rows * (size_t) D6), "zero");
+                    ck(cudaMemset(p2.k_scale, 0, rows * 4 * 2), "zero");
+                    ck(cudaMemset(p2.v_q4, 0, bb), "zero");
                 } else if (fmt == k::kKvInt8) {
                     ck(cudaMemset(p2.k_q, 0, rows * (size_t) D6), "zero");
                     ck(cudaMemset(p2.v_q, 0, rows * (size_t) D6), "zero");
@@ -284,6 +301,12 @@ bool run(int fmt) {
                 if (fmt == k::kKvQ4) {
                     const size_t bb = rows * k::kv_q4_bytes_per_head((int) D6);
                     sl.push_back({A.k_q4, B.k_q4, bb}); sl.push_back({A.v_q4, B.v_q4, bb});
+                } else if (fmt == k::kKvHybrid) {
+                    const size_t gb = rows * (D6 / k::KV_Q8_GROUP);
+                    const size_t bb = rows * k::kv_q4_bytes_per_head((int) D6);
+                    sl.push_back({A.k_q, B.k_q, rows * (size_t) D6});
+                    sl.push_back({A.k_scale, B.k_scale, gb * 2});
+                    sl.push_back({A.v_q4, B.v_q4, bb});
                 } else if (fmt == k::kKvInt8) {
                     const size_t gb = rows * (D6 / k::KV_Q8_GROUP);
                     sl.push_back({A.k_q, B.k_q, rows * (size_t) D6}); sl.push_back({A.v_q, B.v_q, rows * (size_t) D6});
