@@ -5508,6 +5508,26 @@ def main() -> int:
             vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
+            # The lazy encoder takes its VRAM from the expert caches and gives it back through the engine's VRAM
+            # command, and the engine refuses that command with the resident low-RAM mode and with --peer-device
+            # (generate.cpp, the VRAM command).  Started anyway, the encoder finds no VRAM to take: the first image
+            # request fails with 400 and the engine's refusal, on every request after it, while /health stays ok.
+            # A config that cannot hand the VRAM over runs the encoder the plain way instead -
+            # up from the start, the expert caches sized around it at boot - which is what a config without lazy
+            # vision does.  The resident flags are read from the config's args: the engine's INFO line
+            # reports vram_elastic but not whether the resident complement is up, and when the complement cannot be
+            # pinned the engine falls back to --mmap-experts and does answer the command; that costs an encoder
+            # started at boot, not a failed request.
+            cargs = cfg.get("args") or []
+            refused = next((f for f in ("--resident-experts", "--resident-cpu-experts", "--resident-budget-gib")
+                            if f in cargs), None)
+            refused = (f"the resident low-RAM mode ({refused})" if refused else
+                       "--peer-device" if "--peer-device" in cargs else None)
+            if vcfg.get("lazy") and refused:
+                vcfg["lazy"] = False
+                print(f"[strata] vision.lazy is off with {refused}: the encoder's VRAM handoff needs the engine's "
+                      "VRAM command, which that mode refuses; the encoder starts with the model and the expert "
+                      "caches size around it (docs/DETAILS.md, 'Lazy vision')", flush=True)
             if vcfg.get("lazy") and "vram_mib" not in vcfg:
                 # the encoder's per-GPU VRAM while it is up: handed back from the expert caches by the VRAM command
                 # (defaults measured with this mmproj: 1430 MiB on CUDA0 + 308 MiB on CUDA1, rounded to segments)
