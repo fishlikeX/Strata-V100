@@ -147,6 +147,57 @@ Per-request time-to-first-token reporting now follows the same rule on the solo 
 slot path: the wall time from the request's start to its first generated token, recorded
 per request in `/metrics` (`ttft_ms`).
 
+## Retained CPU, PLE and Volta changes
+
+These changes are retained in the fork. They keep the model formats, the int8 KV
+cache at a 524,288-token context, vision, MTP, the L2/L3 conversation tiers and
+the NVMe-backed n-gram table. No 20% end-to-end gain is proved yet, and no
+performance guarantee follows. The final measurements are still pending.
+
+- **AVX-2 i-quant rows (IQ3_XXS, IQ3_S, IQ2_S).** On a CPU with AVX2, no AVX-512
+  and no AVX-VNNI, the AVX-2 expert kernel serves one-token (NT1) gate/up rows
+  for these three formats by default. NT means the tokens in one group; NT1 is a
+  group of one token. The IQ3_S and IQ2_S decodes use 32-bit loads to read packed
+  index bytes, which shortens the grid assembly. The rows reduce in ggml-cpu's
+  own float order and apply the format normalization factor after the reduction,
+  so a row is ggml's dot product bit for bit, including subnormal products. The
+  IQ4_NL down rows are unchanged. An explicit `STRATA_IQ_MT_MIN` keeps its rule
+  and overrides this default.
+- **CPU pool workers on SMT siblings.** After each non-host physical core has a
+  worker, the pool pins additional workers to the allowed SMT siblings of the
+  worker cores. SMT (simultaneous multithreading) means a physical core's second
+  logical processor. The host core's sibling comes last. A CPU outside the
+  process's allowed set, and any CPU a worker or the host already holds, is
+  skipped. The default placement is unchanged: a pool no larger than the physical
+  core count, which is five workers and the host thread on the measured six-core
+  CPU. On Windows the extras stay unpinned, as before.
+- **L3 background-writer affinity.** The two asynchronous NVMe park writers, the
+  conversation delta park and the L3 root-prefix park, restore the allowed CPUs
+  at the start of the writer thread. A new thread inherits the serving thread's
+  pin, which the session loop holds to the reserved host core (the first physical
+  core, logical processor 0), so before this change each writer ran on one
+  logical processor. The pool captures the allowed CPUs at construction, before
+  that pin; each writer, created later on the pinned thread, captures a copy of
+  that saved set and restores it at entry. The GPU host thread stays pinned. The
+  L2 parking, the snapshot format, the FNV hash, the disk budgets and the order
+  of the future writes are unchanged. In a strace smoke on two NVMe conversation
+  files, the old writer inherits mask [0] and restores nothing; each new writer
+  restores [0..11] before its file open. Each restore returns 0 on the machine (six
+  cores, 12 threads). The RAM A/B/A reuse was 4615 of 4620 tokens in both arms.
+  The trace is not timing evidence. The matched HTTP study does not meet the
+  20% target. See the [CPU and SSD study](../benchmarks/v100-iq3_s-prefill-wmma.md#cpu-and-ssd-study-2026-10-10).
+- **SSD-PLE page cache and boundary rows.** The n-gram (PLE) reader's bounded
+  page cache now copies a row that crosses a page boundary from both cached
+  pages. Before, such a row always re-read the SSD. The reader copies the head of
+  the row from the first page and the tail from the second. The destination stays
+  unchanged when a page is missing, so a partial hit is still a miss. This covers
+  the 90-byte IQ4_NL row (the production default) and the 110-byte Q5_0 row.
+- **Volta prompt top-k bound.** On sm_70 the prompt path's QSA top-k may use the
+  active-block bound of a prefill. The bound selects the register kernel when the
+  prompt's active blocks fit it, even when a long context capacity makes the
+  score-row stride large. Decode and captured graphs pass no bound and keep the
+  capacity rule. Other CUDA devices keep the capacity rule.
+
 ## Speed (measured)
 
 ### Tesla V100 fork benchmark
@@ -436,7 +487,10 @@ slightly differently. How many tokens share an expert depends on the drafts in a
 at temperature 0 can end in a different (equally good) answer when the drafting, the cache state or a resumed
 conversation differ (issue #152). `STRATA_IQ_MT_MIN=1` (in the config's `env`) uses the multi-token kernels for
 every group: the answer then no longer depends on the drafting. Measured on a Ryzen 7600 (AVX-512): IQ3_S decode
--1..-3%, the other models the same; the default stays the fastest rule. On an Intel CPU of Alder Lake or later
+-1..-3%, the other models the same; the default stays the fastest rule. On a CPU with AVX2 but no AVX-512 and no
+AVX-VNNI, the default instead serves IQ3_XXS, IQ3_S and IQ2_S one-token (NT1) gate/up rows with the AVX-2 kernel;
+those rows are ggml's dot product bit for bit, so a lone token's rows no longer depend on the drafting there.
+`STRATA_IQ_MT_MIN` set still overrides this default. On an Intel CPU of Alder Lake or later
 without AVX-512, where the AVX-2 kernel gathers the IQ3_S grid, `STRATA_IQ3S_MT1=1` (opt-in) gives IQ3_S the multi-token
 kernel for one token, which is the faster one there; it changes a lone token's rounding, so it is off by default. Through the server, two more things carry
 over from one request to the next (#410): the adaptive tier moves experts between RAM and VRAM (the GPU and the CPU

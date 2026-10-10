@@ -129,16 +129,28 @@ static bool round_trip_full_mask(const std::vector<int>& allowed) {
     return pinned && expect_affinity(allowed, "restore full allowed mask");
 }
 
-static bool topology_respects_current_mask() {
+static bool topology_respects_current_mask(bool reserve_host = false) {
     std::vector<int> allowed;
     if (!get_affinity(allowed)) return false;
-    const auto topology = cpu::detect_cpu_topology(false);
-    if (topology.worker_cores.empty()) return false;
-    for (int core : topology.worker_cores) {
+    const auto topology = cpu::detect_cpu_topology(reserve_host);
+    if (topology.worker_cores.empty() && topology.host_core < 0) return false;
+    // The host, physical-core workers, and overflow siblings must use distinct
+    // logical processors from the current allowed mask.
+    std::vector<int> taken;
+    if (topology.host_core >= 0) taken.push_back(topology.host_core);
+    taken.insert(taken.end(), topology.worker_cores.begin(), topology.worker_cores.end());
+    taken.insert(taken.end(), topology.overflow_cores.begin(), topology.overflow_cores.end());
+    for (int core : taken) {
         if (!std::binary_search(allowed.begin(), allowed.end(), core)) {
             std::fprintf(stderr, "Linux affinity test: topology selected disallowed CPU %d\n", core);
             return false;
         }
+    }
+    std::vector<int> sorted = taken;
+    std::sort(sorted.begin(), sorted.end());
+    if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
+        std::fprintf(stderr, "Linux affinity test: topology placed two pool threads on one logical processor\n");
+        return false;
     }
     return true;
 }
@@ -150,7 +162,7 @@ static bool round_trip_sparse_nested(const std::vector<int>& allowed) {
     }
     const std::vector<int> sparse{allowed.front(), allowed.back()};
     if (!set_affinity(sparse) || !expect_affinity(sparse, "establish sparse mask") ||
-        !topology_respects_current_mask()) return false;
+        !topology_respects_current_mask() || !topology_respects_current_mask(true)) return false;
 
     const auto outer = cpu::pin_current_thread(sparse.front());
     const bool outer_pinned = outer.valid && expect_affinity({sparse.front()}, "outer pin");
@@ -193,7 +205,7 @@ static bool round_trip_high_cpu(const std::vector<int>& allowed, bool require_hi
     // Restoring the high-only mask catches truncation even when the original process mask is sparse.
     const std::vector<int> high_only{*it};
     if (!set_affinity(high_only) || !expect_affinity(high_only, "establish high-only mask") ||
-        !topology_respects_current_mask()) return false;
+        !topology_respects_current_mask() || !topology_respects_current_mask(true)) return false;
     const auto previous = cpu::pin_current_thread(target);
     const bool pinned = previous.valid && expect_affinity({target}, "pin away from high-only mask");
     cpu::restore_thread_affinity(previous);

@@ -6,8 +6,15 @@
 // a `madd` and an `add`.  ggml-cpu's own AVX2 dot products for these formats are single-token: every token
 // re-does the codebook lookups and the sign expansion.  The sign vector is ggml's bit_selector pattern
 // (ggml-cpu/arch/x86/quants.c): pshufb-broadcast of each sign byte, AND with the bit selector, CMPEQ, OR
-// with one, `vpsignb`.  The arithmetic is ggml's (ggml-cpu/quants.c, the `_generic` references) - only the
-// order of the float additions differs.
+// with one, `vpsignb`.  The arithmetic is ggml's (ggml-cpu/quants.c, the `_generic` references).  The three formats
+// whose ggml-cpu reference reduces in its own hsum order and multiplies its K into the reduced sum (IQ3_XXS, IQ3_S,
+// IQ2_S - hsum8_ggml and the K placement in iq_avx2_rows.inl) are ggml's vec_dot bit for bit; the others differ in
+// the order of the float additions and (IQ2_XXS, IQ2_XS) fold their K into d instead of into the result.
+//
+// On the AVX-2 cores the decode is bound by the two load ports, and the grid assembly is most of that: IQ3_S and
+// IQ2_S read a half's index vector back two indices per 32-bit load (idx_lo/idx_hi), not one 16-bit load per index.
+// IQ3_XXS keeps its one-byte-per-index codebook loads: the packed form measured slower there (a regression at three
+// and four tokens).
 //
 // Formats: IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22), IQ4_XS (23).  IQ1_M stays on ggml-cpu.
 //
@@ -161,10 +168,22 @@ static_assert(scale_vecs.s32[15][0] == 31 && scale_vecs.s16[0x2F][7] == 31 && sc
 inline __m256i scale_vec(const int16_t* lanes) { return _mm256_loadu_si256((const __m256i*) lanes); }
 
 // The low index bytes q[0..7] interleaved with the spread high bits: eight 16-bit grid indices in sp[].
-inline void grid_indices(const uint8_t* q, uint64_t hi, uint16_t* sp) {
-    _mm_storeu_si128((__m128i*) sp, _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)),
-                                                      _mm_cvtsi64_si128((long long) hi)));
+inline void grid_indices(const uint8_t* q, uint64_t hi, uint32_t* sp) {
+    _mm_storeu_si128((__m128i*) sp, _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)), _mm_cvtsi64_si128((long long) hi)));
 }
+// One IQ2_S half's four index bytes: the same words, the half's four 16-bit indices in the low 8 bytes.
+inline void grid_indices4(const uint8_t* q, uint32_t hi, uint32_t* sp) {
+    _mm_storel_epi64((__m128i*) sp, _mm_unpacklo_epi8(_mm_cvtsi32_si128((int) u32(q)), _mm_cvtsi32_si128((int) hi)));
+}
+// The two 16-bit indices of one 32-bit word of sp[]: (idx_lo, idx_hi) = (index 2k, index 2k+1).
+//
+// The decode here is bound by the two load ports of the AVX-2 cores this file exists for, and the grid assembly
+// is most of it (STRATA_IQ256_GATHER's commit: substituting a constant for the grid vector takes IQ3_S 357 ->
+// 140 us).  Reading the index vector back one 16-bit index per load spends eight load slots per 32-value half;
+// one 32-bit load plus a shift and a mask yields the same two indices from half the slots, on ALU ports that
+// are idle.  The indices, the grid words and every sum are unchanged, so every row keeps its bits.
+inline uint32_t idx_lo(uint32_t w) { return w & 0xffffu; }
+inline uint32_t idx_hi(uint32_t w) { return w >> 16; }
 
 inline float hsum8(__m256 v) {
     const __m128 lo = _mm256_castps256_ps128(v), hi = _mm256_extractf128_ps(v, 1);
@@ -172,6 +191,29 @@ inline float hsum8(__m256 v) {
     s = _mm_hadd_ps(s, s);
     s = _mm_hadd_ps(s, s);
     return _mm_cvtss_f32(s);
+}
+
+// ggml-cpu's own hsum_float_8 order (arch/x86/quants.c, __AVX2__): ((r0+r4)+(r2+r6)) + ((r1+r5)+(r3+r7)).  hsum8
+// above folds the same lanes as ((r0+r4)+(r1+r5)) + ((r2+r6)+(r3+r7)), which rounds differently.  ggml's IQ3_XXS,
+// IQ3_S and IQ2_S dot products reduce this way; their per-block integer sums are the same, and ggml scales the
+// reduced sum by its K (0.25f / 0.125f) rather than folding it into d, so reducing in ggml's order and scaling the
+// result the same way (row_dot in iq_avx2_rows.inl) makes those formats' rows ggml's vec_dot bit for bit - not
+// merely close, including a subnormal product, where the two K placements round apart.  The reduction runs once
+// per token on that token's own accumulator, so a token's rows are the same alone and in any group (the #152 rule).
+inline float hsum8_ggml(__m256 v) {
+    __m128 res = _mm256_extractf128_ps(v, 1);
+    res = _mm_add_ps(res, _mm256_castps256_ps128(v));
+    res = _mm_add_ps(res, _mm_movehl_ps(res, res));
+    res = _mm_add_ss(res, _mm_movehdup_ps(res));
+    return _mm_cvtss_f32(res);
+}
+
+// The formats whose ggml-cpu reference (arch/x86/quants.c) reduces in that order and scales the result by K:
+// IQ3_XXS, IQ3_S and IQ2_S, and the gathered decodes 118/121/122, which are their scalar forms' bit-for-bit twins.
+// IQ4_XS (23) and the rest keep hsum8 and their K in d: they are not dispatched at one token, so their bits need
+// not change.
+template <int TY> constexpr bool ggml_hsum() {
+    return TY == 18 || TY == 21 || TY == 22 || TY == 118 || TY == 121 || TY == 122;
 }
 
 // E-2 (iq_avx512.cpp) on the AVX-2 path: the pool streams the expert rows from DRAM at ~25 GB/s (4 KB pages
@@ -232,11 +274,11 @@ template <> struct Fmt32<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign byt
     static constexpr int bytes = 82;
     static constexpr float K = 0.125f;
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
-        // grid_indices reads 8 index bytes; only the first 4 are this half's (the rest stay inside the block)
-        alignas(16) uint16_t sp[8];
-        grid_indices(b + 2 + 8 * j + 4 * half, hi_spread.iq2s[b[66 + 2 * j + half]], sp);
-        g = _mm256_set_epi64x((long long) iq2s_grid[sp[3]], (long long) iq2s_grid[sp[2]],
-                              (long long) iq2s_grid[sp[1]], (long long) iq2s_grid[sp[0]]);
+        // grid_indices4 reads this half's 4 index bytes (the other half's stay inside the block)
+        alignas(16) uint32_t sp[2];
+        grid_indices4(b + 2 + 8 * j + 4 * half, (uint32_t) hi_spread.iq2s[b[66 + 2 * j + half]], sp);
+        g = _mm256_set_epi64x((long long) iq2s_grid[idx_hi(sp[1])], (long long) iq2s_grid[idx_lo(sp[1])],
+                              (long long) iq2s_grid[idx_hi(sp[0])], (long long) iq2s_grid[idx_lo(sp[0])]);
         sgn = sgn_vec_at(b + 2 + 32 + 8 * j + 4 * half);
         sc = scale_vec(scale_vecs.s16[b[74 + 2 * j + half]]);
     }
@@ -262,10 +304,11 @@ template <> struct Fmt32<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
         const uint32_t h = b[66 + 2 * j + half];
-        alignas(16) uint16_t sp[8];
+        alignas(16) uint32_t sp[4];
         grid_indices(q, hi_spread.iq3s[h], sp);
-#define G3(k) (int) iq3s_grid[sp[k]]
-        g = _mm256_set_epi32(G3(7), G3(6), G3(5), G3(4), G3(3), G3(2), G3(1), G3(0));
+#define G3(k) (int) iq3s_grid[k]
+        g = _mm256_set_epi32(G3(idx_hi(sp[3])), G3(idx_lo(sp[3])), G3(idx_hi(sp[2])), G3(idx_lo(sp[2])),
+                             G3(idx_hi(sp[1])), G3(idx_lo(sp[1])), G3(idx_hi(sp[0])), G3(idx_lo(sp[0])));
 #undef G3
         sgn = sgn_vec_at(b + 74 + 8 * j + 4 * half);
         const uint8_t s = b[106 + j];

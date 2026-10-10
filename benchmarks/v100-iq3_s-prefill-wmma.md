@@ -291,3 +291,130 @@ and transition checks. Published records omit private credentials and home
 paths. The source-state fields identify uncommitted builds; binary hashes
 identify the tested executables.
 
+## CPU and SSD study, 2026-10-10
+
+This study uses a later baseline than the preceding study. Its installed
+baseline engine has SHA-256
+`c6e0694c7b3c65709e7c298eb55fdfc5be4d719275da38dafabb19823db53281`.
+Do not add the gains from the preceding study to these results.
+
+The machine has two 16 GiB V100 GPUs. GPU 0 uses PCIe Gen3 x4.
+GPU 1 uses PCIe Gen3 x16. The CPU is a Ryzen 5 3600 with six physical
+cores and 12 logical processors. The GPU power limit stays at 175 W.
+The model stays IQ3_S, with its existing mixed expert formats.
+
+### Protected HTTP comparison
+
+Run three repeats at each target, with seed 20261010 and 256 output
+tokens. Start each arm with a fresh test-owned conversation directory
+on the same NVMe device. Stop the service for isolated measurements.
+Do not run builds or other benchmarks during an arm.
+
+Both arms keep INT8 KV, context capacity 524,288, and KV growth.
+They keep MTP window 8 and minimum probability 0.70, image support,
+the 15,360 MiB RAM conversation cache with 32 slots, and the 50 GiB
+NVMe conversation cache. The PLE table stays on NVMe. These capacity
+settings do not mean that this study tests a 524,288-token prompt.
+
+All 18 requests generate 256 tokens. All requests have zero prefix reuse.
+The table shows the median rate in tokens per second.
+
+| Target | Baseline prefill | Candidate prefill | Change | Baseline decode | Candidate decode | Change |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 558.6 | 599.1 | +7.3% | 62.7 | 59.0 | -5.9% |
+| 8,192 | 1,134.7 | 1,168.4 | +3.0% | 61.6 | 63.5 | +3.1% |
+| 32,768 | 1,832.3 | 1,729.2 | -5.6% | 57.6 | 64.2 | +11.5% |
+
+**This candidate does not meet the 20% prefill and decode target.**
+It is not a general throughput improvement. Three repeats do not give
+a confidence interval for small changes. Do not use a selected context
+or a selected repeat to claim that the target is met.
+
+### Retained changes and rejected experiments
+
+The candidate makes selected CPU gate/up formats match the GGML AVX2
+reference. It uses packed index reads for IQ2_S and IQ3_S. It uses
+single-token CPU dispatch by default only on the selected AVX2 path.
+An explicit user threshold still takes precedence.
+
+The CPU pool places overflow workers on allowed SMT siblings.
+The main GPU host thread stays pinned. The two background conversation
+writers restore the original allowed CPU set before they write to NVMe.
+The PLE reader copies a row across two cached pages without another SSD
+read. A partial cache hit leaves the output unchanged until the SSD read.
+The QSA prefill selector can use active block bounds on SM70.
+Decode graph selection keeps its capacity-based rule.
+
+Measure total CPU compute budgets from 6 through 10. The direct protocol
+disables conversation caching, so its results are supplementary.
+Keep the default budget of six: five workers and the host thread.
+No tested budget gives a consistent 20% gain in both phases.
+Some arms stop before 256 output tokens. Mark these arms as not comparable
+at a fixed output length.
+
+Reject the larger WMMA tile, vector staging, smaller half-block tile,
+secondary PCIe-share overrides, changed layer split, changed stream
+threshold, larger PLE row cache, and disabled WMMA experiments.
+Remove their temporary implementation changes. Keep the existing WMMA,
+cache budgets, layer split, and automatic PCIe-share policy.
+
+### Correctness evidence
+
+The expanded CPU reference test fails in nine groups when linked to the
+original CPU library. The candidate passes the CPU parity tests.
+The cases cover token-group widths 1 through 8, cancellation, and
+subnormal products. The CPU affinity test passes sparse allowed masks
+and both host-reservation modes.
+
+An actual RAM-cache A/B/A smoke restores 4,615 of 4,620 prompt tokens
+with both the baseline and candidate. A syscall trace observes two NVMe
+writers in each arm. The original writers inherit CPU mask `[0]` and
+do not restore it. Both candidate writers successfully restore `[0..11]`
+before their conversation-file open. The file rename operations succeed.
+These trace results prove the affinity change. They are not timing evidence.
+
+The complete built CTest run has 100 passes, two skips, and three failures.
+The skips require newer GPU instructions. One failure needs a missing
+legacy Q2_0 PLE fixture. One requires AVX512 instructions that this CPU
+does not have. The third is a K8V4 test-harness defect: the test uses
+the FP16 zeroing branch for hybrid pools and passes a null pointer to
+`cudaMemset`. Its hybrid batch-append and comparison helpers also lack
+hybrid branches. The protected INT8 streamed-KV cases pass 306 random
+batches, ring restore, and batch-versus-step checks bitwise. No KV
+runtime change is made for this unrelated test defect. Do not report
+the full suite as passed.
+
+The real-model native expert smoke passes at layers 0, 16, 20, 24,
+28, 32, and 47. It covers IQ3_XXS, IQ2_S, IQ3_S and IQ4_XS gate/up
+weights, with IQ4_NL and Q2_0 down weights. The selected gate/up
+formats match the GGML dot reference. One-token and three-token
+gate/up and down outputs have no differing rows in this smoke.
+Full expert operations pass the existing tolerance; they are not a
+bit-exact model-output test.
+
+The PLE selftest also passes on the production NVMe mount, in an owned
+temporary directory. It checks both 90-byte and 110-byte rows, with
+IQ4_NL, Q5_0, F8_E4M3, Q5_1, Q8_0, Q4_0 and BF16 dequantizers.
+
+The installed candidate identifies a generated solid-red PNG as `Red`.
+The text question does not name the color. The request generates 112
+tokens, with 111 speculative drafts offered and 81 accepted.
+The restart smoke restores 4,615 tokens from NVMe. The following A/B/A
+smoke records two RAM restores. The final NVMe counters show two restores
+and 9,230 restored tokens, with zero corruptions and zero write failures.
+The service reports context 524,288, INT8 KV, image support, MTP
+window 8, minimum probability 0.70, and the unchanged cache budgets.
+Startup reports elastic KV on both GPUs: 16,384 resident cells out of
+524,288 logical cells each. The PLE reader keeps the NVMe SSD awake
+with page reads. It does not use a whole-table RAM override.
+
+The installed engine has SHA-256
+`c2256dd20f00df2bde1def55b8c33b01566a67d68a8ccea0789b1cb451a362c6`.
+The original executable is saved outside the repository. The candidate
+service is active after the checks.
+
+See the [machine-readable measurements](../bench/results/2026-10-10-v100-cpu-ssd/measurements.json)
+for the direct arms, fixed-output comparison flags, protected HTTP
+records, and verification evidence. The published data has no private
+configuration, credentials, request text, or home paths.
+

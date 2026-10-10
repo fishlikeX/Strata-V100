@@ -3271,8 +3271,8 @@ int main(int argc, char** argv) {
             }
             strata::kernels::mrope_table_set(st.mrope);
         }
-        // its own PCIe share of the missed experts (the same rule as CUDA0's above: its link is probed).  A given
-        // --pcie-frac is every stage's share and skips these probes (pcie_given); there is no per-stage setting yet.
+        // its own PCIe share of the missed experts (the same rule as CUDA0's above: its link is probed).
+        // A given --pcie-frac is every stage's share and skips these probes; there is no per-stage setting yet.
         st.pcie_frac = o.pcie_frac;
         if (!pcie_given && native_pack) {
             std::string bursts;
@@ -4168,11 +4168,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: hybrid CPU detected (%d P-cores / %d threads, %d E-cores), pool workers: %d, affinity: %s\n",
                      pool.p_cores(), pool.p_threads(), pool.e_cores(), pool.workers(), aff_str);
     }
-    {   // where the threads run (--host-core)
+    {   // where the threads run (--host-core).  The pool's own placement, so a --pool-workers sweep can be read
+        // back: worker_cpu() names the physical cores first and then the SMT siblings (see pool.hpp).
         const strata::kernels::cpu::CpuTopology ht = strata::kernels::cpu::detect_cpu_topology(true, o.pool_affinity);
         std::string on;
-        for (int i = 0; i < pool.workers() && i < (int) ht.worker_cores.size(); ++i)
-            on += (i > 0 ? "," : "") + std::to_string(ht.worker_cores[(size_t) i]);
+        for (int i = 0; i < pool.workers(); ++i) {
+            const int cpu = pool.worker_cpu(i);
+            on += (i > 0 ? "," : "") + (cpu < 0 ? std::string("unpinned") : std::to_string(cpu));
+        }
         std::fprintf(stderr, "strata generate: %d pool workers on logical processors %s, the host thread on %d%s "
                              "(--host-core %s)\n", pool.workers(), on.c_str(), ht.host_core,
                      pool.host_works() ? " (draining too)" : "",
@@ -7160,7 +7163,10 @@ int main(int argc, char** argv) {
             // request uses the GPUs. A lookup or a later park joins the one pending write before the store index.
             pending_disk_write.emplace(std::async(std::launch::async,
                 [&disk, record = std::move(record), capture_ms, tokens, ram_bytes, delta_tokens,
-                 chain_key, fresh, seed_base, base_tokens]() mutable {
+                 chain_key, fresh, seed_base, base_tokens, aff = pool.submission_affinity()]() mutable {
+                    // A new thread inherits the GPU driver's single-core pin (pool.hpp); restore the pool's
+                    // original allowed CPUs so the file write is not restricted to that one core.
+                    strata::kernels::cpu::restore_thread_affinity(aff);
                     DiskWriteResult result;
                     result.capture_ms = capture_ms;
                     result.tokens = tokens;
@@ -7541,7 +7547,11 @@ int main(int argc, char** argv) {
                 const size_t tokens = (size_t) L;
                 if (l3_want) {
                     pending_disk_write.emplace(std::async(std::launch::async,
-                        [&disk, record = std::move(record), tokens, ram_bytes, pname]() mutable {
+                        [&disk, record = std::move(record), tokens, ram_bytes, pname,
+                         aff = pool.submission_affinity()]() mutable {
+                            // A new thread inherits the GPU driver's single-core pin (pool.hpp); restore the pool's
+                            // original allowed CPUs so the file write is not restricted to that one core.
+                            strata::kernels::cpu::restore_thread_affinity(aff);
                             DiskWriteResult result;
                             result.root = true;
                             result.tokens = tokens;

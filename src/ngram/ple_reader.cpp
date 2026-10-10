@@ -36,9 +36,8 @@ constexpr uint32_t EMPTY = 0xFFFFFFFFu;
 /// to read. Memory is still expressed in ROWS by the CLI, so a configured budget reserves the same bytes;
 /// what those bytes buy is pages instead of individual rows.
 ///
-/// `find_row` returns a pointer INTO the cached page, or nullptr when any page the row touches is absent.
-/// A row can straddle a boundary, and a partial hit is not offered: the caller memcpy's row_bytes straight
-/// out of the pointer, so a half-resident row would be a silently wrong answer rather than a miss.
+/// `copy_row` serves a row only when every page it touches is cached. Pages can
+/// occupy unrelated cache slots, so a boundary row needs two separate copies.
 struct PageCache {
     uint64_t sets = 0;
     std::vector<uint32_t> keys;     ///< sets * WAYS, EMPTY = vacant
@@ -68,26 +67,23 @@ struct PageCache {
             if (keys[s * WAYS + w] == p) return &data[(size_t)(s * WAYS + w) * PAGE];
         return nullptr;
     }
-    /// A pointer to the row, or nullptr if the row cannot be served from cache.
-    ///
-    /// A row that SPANS a page boundary is deliberately never served from here, even when both of its
-    /// pages are resident. The two pages live in unrelated slots of a set-associative cache, so they are
-    /// not adjacent in memory, and the caller memcpy's row_bytes straight out of the pointer we return:
-    /// returning the first page's base plus the in-page offset would hand back the head of the row from
-    /// the right page and its tail from unrelated memory. That is silent corruption rather than a miss.
-    ///
-    /// The cost is small and bounded: a row straddles when its 90 bytes cross a 4096 boundary, which is
-    /// 90/4096 = 2.2% of rows. Those rows simply always re-read, which is what happened before this cache
-    /// existed. Correctness is not worth trading for 2% of rows.
-    const uint8_t* find_row(uint32_t row) const {
-        if (sets == 0) return nullptr;
+    /// Copy the complete row, or leave the destination unchanged on a miss.
+    bool copy_row(uint32_t row, uint8_t* dst) const {
+        if (sets == 0) return false;
         const uint64_t at = table_offset + (uint64_t) row * row_bytes;
         const uint64_t first = at / PAGE;
-        const uint64_t last = (at + row_bytes - 1) / PAGE;
-        if (last != first) return nullptr;             // straddles: would need two adjacent slots
-        const uint8_t* base = page(first);
-        if (!base) return nullptr;
-        return base + size_t(at - first * PAGE);
+        const uint32_t offset = (uint32_t) (at - first * PAGE);
+        const uint8_t* head = page(first);
+        if (!head) return false;
+        const uint32_t head_bytes = std::min(row_bytes, PAGE - offset);
+        const uint8_t* tail = nullptr;
+        if (head_bytes < row_bytes) {
+            tail = page(first + 1);
+            if (!tail) return false;
+        }
+        std::memcpy(dst, head + offset, head_bytes);
+        if (tail) std::memcpy(dst + head_bytes, tail, row_bytes - head_bytes);
+        return true;
     }
     void insert_page(uint64_t p, const uint8_t* bytes) {
         if (sets == 0) return;
@@ -479,8 +475,7 @@ PleReader::Ticket PleReader::issue(const uint32_t* rows, size_t n, uint8_t* out_
             std::memset(dst, 0, rb);
             continue;
         }
-        if (const uint8_t* hit = m.cache.find_row(rows[i])) {
-            std::memcpy(dst, hit, rb);
+        if (m.cache.copy_row(rows[i], dst)) {
             ++m.stats.cache_hits;
             continue;
         }

@@ -5,8 +5,11 @@
 //     iq_avx2_parity [--cpu N]
 //         IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S and IQ4_XS gate/up rows, IQ4_NL and Q2_0 down rows: every variant
 //         this CPU runs, 1..8 tokens, each token's rows bit for bit the scalar variant's rows for that token alone (so
-//         also the same at every width, #152); the scalar rows against ggml-cpu's vec_dot (Q2_0: a double
-//         reference), rel <= 1e-5; and where the engine's dispatch (native_gu_rows) takes the multi-token kernel from
+//         also the same at every width, #152); the scalar rows against ggml-cpu's vec_dot: IQ3_XXS, IQ3_S and IQ2_S
+//         bit for bit (they reduce in ggml's own hsum order and scale the reduced sum by K as ggml does, iq_avx2.cpp;
+//         random blocks, a cancellation activation and a low-magnitude sweep that puts the per-block product
+//         subnormal), the rest (Q2_0: a double reference)
+//         rel <= 1e-5; and where the engine's dispatch (native_gu_rows) takes the multi-token kernel from
 //         one token on (native_gu_mt_min), each token's rows the same alone and in a group.
 //     iq_avx2_parity --bench [--cpu N] [--nt 1,2,3,4] [--mb 256] [--reps 5] [--pairs iq3_s/iq4_nl,...] [--dispatch]
 //         ms per expert on one thread: each variant, ggml-cpu's per-token dot, and the engine's dispatch
@@ -245,9 +248,66 @@ int check_gate_up(int type) {
         gu_rows_v(0, type, blob.data(), f.gu_row, f.up_off, &a.gup[t], 1, &of);
     }
     int failures = 0;
-    const double r_ggml = rel(one_g.data(), ref.data(), one_g.size());
-    std::printf("  %-8s gate rows vs ggml vec_dot: rel %.2e\n", type_name(type), r_ggml);
-    if (!(r_ggml <= 1e-5)) { std::printf("  %-8s MISMATCH against ggml\n", type_name(type)); ++failures; }
+    // IQ3_XXS, IQ3_S and IQ2_S reduce their rows in ggml-cpu's own hsum order and scale the reduced sum by K as ggml
+    // does (iq_avx2.cpp, hsum8_ggml; the K placement is in iq_avx2_rows.inl), so their one-token rows are ggml's
+    // vec_dot bit for bit - the same output bytes, not merely close.  The fixture's signed weights and activations
+    // make a row's accumulator lanes cancel, which is where two reduction orders round apart,
+    // so the memcmp catches a wrong order.  ggml_cpu_has_avx2() is the guard: it says ggml-cpu itself was compiled
+    // with __AVX2__ (its arch/x86 quants), which is the only case its reference is the AVX2 one; otherwise (an
+    // ISA-floor build's generic reference, a different summation order) the row is checked to 1e-5 like the rest.
+    const bool ggml_bits = (type == 18 || type == 21 || type == 22) && ggml_cpu_has_avx2() != 0;
+    if (ggml_bits) {
+        const size_t d = rows_differ(one_g.data(), ref.data(), one_g.size());
+        std::printf("  %-8s gate rows vs ggml vec_dot: %zu of %zu values differ bit for bit\n", type_name(type), d,
+                    one_g.size());
+        if (d) { std::printf("  %-8s MISMATCH against ggml (bit for bit)\n", type_name(type)); ++failures; }
+        // A second, deterministic activation built for cancellation: alternating large magnitudes make a row's
+        // accumulator lanes large and of opposite sign, the boundary case of the reduction.
+        std::vector<uint8_t> ca((size_t) cpu::kNativeActBytes);
+        std::vector<float> cx((size_t) kH);
+        for (size_t i = 0; i < cx.size(); ++i) cx[i] = ((i & 1) ? -1.f : 1.f) * (float) (1 + (int) (i % 9));
+        cpu::native_quant_act(f, cx.data(), ca.data());
+        const void* cap[1] = {ca.data()};
+        std::vector<float> cg(R), cref(R);
+        float* cgp = cg.data();
+        gate_rows_v(0, type, blob.data(), f.gu_row, cap, 1, &cgp);
+        for (size_t r = 0; r < R; ++r)
+            traits_cpu(type)->vec_dot((int) kH, &cref[r], 0, blob.data() + r * f.gu_row, 0, ca.data(), 0, 1);
+        const size_t cd = rows_differ(cg.data(), cref.data(), R);
+        std::printf("  %-8s gate rows, cancellation activation vs ggml: %zu of %zu values differ bit for bit\n",
+                    type_name(type), cd, R);
+        if (cd) { std::printf("  %-8s MISMATCH against ggml (cancellation)\n", type_name(type)); ++failures; }
+
+        // A third family: low-magnitude activations whose q8_K scale makes the per-block product fp16(d)*y.d
+        // subnormal.  There the two K placements - folded into d (as IQ2_XXS/IQ2_XS keep it) or multiplied into the
+        // reduced sum (ggml's IQ3_XXS/IQ2_S reference) - round apart, so this catches a K put back inside the FMA;
+        // the sweep crosses the normal/subnormal boundary and every magnitude must still be ggml's bits.
+        size_t ld = 0;
+        int lmags = 0;
+        for (int e = -116; e <= -104; e += 2) {
+            const float m = std::ldexp(1.f, e);   // max |x|: 127/m stays finite, so the q8_K scale is not inf
+            std::vector<float> lx((size_t) kH);
+            for (size_t i = 0; i < lx.size(); ++i)
+                lx[i] = ((i & 1) ? -1.f : 1.f) * m * (float) (1 + (int) (i % 9)) / 9.f;
+            std::vector<uint8_t> la((size_t) cpu::kNativeActBytes);
+            cpu::native_quant_act(f, lx.data(), la.data());
+            const void* lap[1] = {la.data()};
+            std::vector<float> lg(R), lref(R);
+            float* lgp = lg.data();
+            gate_rows_v(0, type, blob.data(), f.gu_row, lap, 1, &lgp);
+            for (size_t r = 0; r < R; ++r)
+                traits_cpu(type)->vec_dot((int) kH, &lref[r], 0, blob.data() + r * f.gu_row, 0, la.data(), 0, 1);
+            ld += rows_differ(lg.data(), lref.data(), R);
+            ++lmags;
+        }
+        std::printf("  %-8s gate rows, %d subnormal-product magnitudes vs ggml: %zu of %zu values differ bit for bit\n",
+                    type_name(type), lmags, ld, (size_t) lmags * R);
+        if (ld) { std::printf("  %-8s MISMATCH against ggml (subnormal product)\n", type_name(type)); ++failures; }
+    } else {
+        const double r_ggml = rel(one_g.data(), ref.data(), one_g.size());
+        std::printf("  %-8s gate rows vs ggml vec_dot: rel %.2e\n", type_name(type), r_ggml);
+        if (!(r_ggml <= 1e-5)) { std::printf("  %-8s MISMATCH against ggml\n", type_name(type)); ++failures; }
+    }
     for (int v : subsets(gu_variants())) {
         size_t differ = 0;
         std::vector<float> g(kMaxT * R), ff(kMaxT * R);
@@ -334,8 +394,8 @@ int check_down(int d_type) {
 
 #if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
 // #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from one token on
-// (native_gu_mt_min 1: IQ3_S where its grid is gathered, or every format under STRATA_IQ_MT_MIN=1), each token's
-// gate/up rows must be the same alone and in any group.
+// (native_gu_mt_min 1: IQ3_S where its grid is gathered, IQ3_XXS/IQ3_S/IQ2_S on a pure-AVX-2 CPU, or every format
+// under STRATA_IQ_MT_MIN=1), each token's gate/up rows must be the same alone and in any group.
 int check_engine_width(int type) {
     const int mt = cpu::native_gu_mt_min(type);
     if (mt != 1) {

@@ -1332,20 +1332,25 @@ void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, i
 }
 
 #if !defined(__HIPCC__)
-// Only Turing has a retained model measurement for this CUDA dispatch. Other CUDA devices keep the capacity rule
-// (the RTX 5070 regression below). Cache the properties per calling thread; layer-split device switches are checked.
-static bool topk_active_turing_device() {
+// The CUDA devices whose top-k may use the caller's active-block bound: Volta (sm_70) and Turing (sm_75).  Both have
+// the same 64-register-per-thread limit at 1,024 threads, so the bound never changes the register kernel's width
+// there (TK_PER_MAX == TK_PER on CUDA) - it only picks the register kernel over the reference and wide kernels for a
+// prompt whose blocks fit registers, which is what PR #743 measured on Turing.  Other CUDA devices keep the capacity
+// rule (the RTX 5070 regression below; #337 was measured on RDNA4).  Called only when the caller passed a bound:
+// decode and captured graphs omit it and never query the device here.  Cache the properties per calling thread;
+// layer-split device switches are checked.
+static bool topk_active_bound_device() {
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) return false;
     static thread_local int cached_device = -1;
-    static thread_local bool turing = false;
+    static thread_local bool bounded = false;
     if (dev != cached_device) {
         cudaDeviceProp prop{};
         if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return false;
-        turing = prop.major == 7 && prop.minor == 5;
+        bounded = prop.major == 7 && (prop.minor == 0 || prop.minor == 5);
         cached_device = dev;
     }
-    return turing;
+    return bounded;
 }
 #endif
 
@@ -1436,16 +1441,16 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 #if defined(__HIPCC__)
     const bool counted = active_blocks > 0;
 #else
-    // Turing: --max-context 262144 makes the stride 65538, even while a 131K prompt's active blocks fit in
-    // TK_T * TK_PER registers. Use the prefill bound on sm_75, keeping max_blocks as the score-row stride.
+    // Volta/Turing: --max-context 524288 makes the stride 131074, even while a prompt's active blocks fit in
+    // TK_T * TK_PER registers. Use the prefill bound on sm_70 and sm_75, keeping max_blocks as the score-row stride.
     // Other CUDA devices keep 0.1.32's capacity rule: #337 was measured on RDNA4, and RTX 5070 64K prompts were
     // 1-3% slower. Decode/captured graphs omit the bound and never query the device here.
     static const bool capacity_guard = std::getenv("STRATA_TOPK_CAPACITY_GUARD") != nullptr;
-    // STRATA_TOPK_ACTIVE_ANY=1 (tests): the Turing dispatch on any CUDA card, so qsa_topk_active_parity checks it
-    // on whatever card runs the tests (the kernels are the same on every architecture)
+    // STRATA_TOPK_ACTIVE_ANY=1 (tests and the A/B arm): the Volta/Turing dispatch on any CUDA card, so
+    // qsa_topk_active_parity checks it on whatever card runs the tests (the kernels are the same on every architecture)
     static const bool any_card = [] { const char* v = std::getenv("STRATA_TOPK_ACTIVE_ANY"); return v && v[0] == '1'; }();
     const bool counted = !capacity_guard && active_blocks > 0 && active_blocks <= max_blocks &&
-                         (any_card || topk_active_turing_device());
+                         (any_card || topk_active_bound_device());
 #endif
     const int64_t reach = counted && active_blocks < max_blocks ? active_blocks : max_blocks;
     const int64_t fit = (int64_t) TK_T * (counted ? TK_PER_MAX : TK_PER);

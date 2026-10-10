@@ -291,6 +291,32 @@ int selftest(const std::string& dir, uint32_t rb) {
             CHECK(rd.cache_size() <= rd.cache_capacity(), "row cache exceeded its bound");
         }
     }
+    // A boundary row is a cache hit only while both of its pages are present.
+    for (bool thr : {false, true}) {
+        ng::PleReader rd;
+        std::string err;
+        const uint64_t cache_rows = (8ull * 4096 + rb - 1) / rb;
+        CHECK(rd.open(path, HEADER, N, 8, cache_rows, err, thr, rb), "boundary cache open: %s", err.c_str());
+        uint32_t row = 0;
+        while ((HEADER + (uint64_t) row * rb) / 4096 ==
+               (HEADER + (uint64_t) row * rb + rb - 1) / 4096) ++row;
+        check_rows(rd, {row}, N, rb, "boundary cache fill");
+        const uint64_t reads = rd.snapshot().reads;
+        check_rows(rd, {row, row}, N, rb, "boundary cache hits");
+        CHECK(rd.snapshot().reads == reads, "cached boundary row caused another SSD read");
+        // Eight pages share the one-set cache. Seven replacements remove the
+        // first boundary page but retain the second. A partial hit must read.
+        for (uint32_t page = 2; page < 9; ++page) {
+            const uint32_t other = (uint32_t) ((page * 4096ull - HEADER + rb - 1) / rb);
+            check_rows(rd, {other}, N, rb, "boundary cache eviction");
+        }
+        const uint64_t before_miss = rd.snapshot().reads;
+        check_rows(rd, {row}, N, rb, "boundary cache partial miss");
+        CHECK(rd.snapshot().reads == before_miss + 1, "partial boundary cache hit did not read both pages");
+        const uint64_t after_miss = rd.snapshot().reads;
+        check_rows(rd, {row}, N, rb, "boundary cache refilled");
+        CHECK(rd.snapshot().reads == after_miss, "refilled boundary row caused another SSD read");
+    }
     // fault injection: a 3 ms delay must be observed, and must not change the bytes
     for (bool thr : {false, true}) {
         ng::PleReader rd;
