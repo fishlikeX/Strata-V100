@@ -1710,6 +1710,14 @@ split, or `[1800]` for one GPU; the defaults match this model's encoder).  After
 request the encoder stops and the VRAM goes back to the caches (its encoded pictures stay cached on disk).  The
 first picture after an idle gap answers a few seconds later, so the encoder can start again.
 
+**Lazy vision with the resident low-RAM mode or `--peer-device`:** neither path above exists there. The engine
+refuses the `VRAM` command with the resident low-RAM mode (its caches hold experts RAM does not) and with
+`--peer-device`, and GPU-only KV growth needs every expert in RAM and no `--vram-elastic`, so a resident config
+cannot have it either. Started anyway, the encoder finds no VRAM to take: the first image request answers 400
+with the engine's refusal, on every request after it, while `/health` stays ok. The launcher therefore turns
+`"lazy"` off in such a config and starts the encoder with the model, so the expert caches size around it at
+boot (the same shape as `"lazy": false`).
+
 **Lazy GPU vision with GPU-only KV growth:** Keep `"vram_elastic": false` in the main configuration.
 Set `"gpu": true`, `"lazy": true`, and `"idle_s": 900` in the `"vision"` section. The encoder loads on an
 image request and unloads after 900 idle seconds. The runtime releases expert-cache chunks before the
