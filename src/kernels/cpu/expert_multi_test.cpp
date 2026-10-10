@@ -32,7 +32,13 @@ double now_ms() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    c::cpu_require_expert_support();
+    // The kernel under test is AVX-512 (VNNI + VBMI).  cpu_require_expert_support() exits 1, which reads as a
+    // broken build on a CPU that never had the ISA (an Xeon E5 v3, for example); the test itself is fine, so
+    // it skips the way the other arch-gated parity tests do (SKIP_RETURN_CODE 77).
+    if (!c::cpu_features().usable()) {
+        std::printf("expert_multi_test: this CPU lacks the AVX-512 the kernel under test needs, skipped\n");
+        return 77;
+    }
     std::mt19937 rng(9);
     const bool bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
     const int E = bench ? (argc > 2 ? std::atoi(argv[2]) : 256) : 4;
