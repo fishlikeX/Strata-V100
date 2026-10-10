@@ -418,3 +418,103 @@ for the direct arms, fixed-output comparison flags, protected HTTP
 records, and verification evidence. The published data has no private
 configuration, credentials, request text, or home paths.
 
+## Agentic short-turn latency, 2026-10-10
+
+This study measures chat switches and shared-prefix returns. It does not
+measure a general prefill-throughput improvement. Different chats can have
+different valid reuse lengths. That difference is not a cache defect.
+
+### Retained latency changes
+
+Retain a validated disk root in the bounded RAM cache. Keep that pinned
+image after a RAM restore. Move its K/V payload; copy only the active
+token and image identity metadata. Apply the RAM byte budget, slot limit,
+physical-RAM floor, and root setting.
+
+Use an already captured RAM image to prepare a disk delta when its draft
+layout matches. Keep the disk payload separately owned. Use the existing
+GPU capture when no suitable RAM image is available. Keep the writer
+barrier before each actual store access. Skip a disk lookup when the
+resident prefix already reaches the final useful prompt position.
+
+Keep a recent K/V target of at most 65,536 cells during an active series
+of requests. Return surplus memory after 30 seconds without a completed
+request. The current request can exceed that retained target. The existing
+trim hysteresis still applies. Vision and reserve-pressure paths can
+reclaim memory immediately.
+Keep the prompt-head graph and decode graph selection unchanged.
+
+### Controlled HTTP comparison
+
+Run three process pairs in these orders: baseline/candidate,
+candidate/baseline, and baseline/final candidate. Each process starts
+with a copy of the same pre-seeded NVMe store. Each process runs 11 text
+requests with a fixed output length of 64 tokens. The shared root has
+25,255 tokens. A root return reads only 19 or 20 new prompt tokens.
+Keep all protected model, KV, MTP, cache, vision, and PLE settings.
+Do not run builds or other test workloads during these measurements.
+
+The table shows median direct HTTP time to the first non-empty streamed
+text or reasoning fragment. Lower time is better.
+
+| Case | Requests per engine | Baseline ms | Candidate ms | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Repeat shared-root return | 9 | 1,799.7 | 902.6 | -49.8% |
+| First disk-backed root return | 3 | 2,273.6 | 1,929.0 | -15.2% |
+| Switch to an unrelated small chat | 12 | 1,384.9 | 1,403.7 | +1.4% |
+| Continue the live chat | 3 | 356.6 | 398.0 | +11.6% |
+
+The repeat-root path improves. The unrelated small-chat and live
+continuation paths do not improve in this sample. Do not claim a general
+latency or throughput gain. Cold disk timings vary: one baseline first
+return takes 3,642.4 ms. The sample does not establish a confidence interval.
+
+The last two pairs also retain the current engine metric for each request.
+Their six repeat-root returns per engine have median engine TTFT
+1,691.8 ms versus 799.8 ms, and median prompt time 1,662.2 ms versus
+769.4 ms. The first pair retains direct HTTP timings only; its helper
+selected the oldest history row, so those engine fields are discarded.
+HTTP timing includes front-end work that the engine metric does not include.
+
+Each baseline process reads the root from disk five times and records
+no RAM restores. Each candidate process reads it once, promotes it once,
+and records four RAM restores. All six processes have zero RAM evictions.
+The promoted root uses 504,146,280 bytes. The final RAM-card check reports
+two parked images, two parks, and 861,525,912 bytes after the first return.
+
+### Correctness and installed-service evidence
+
+The snapshot regression compares CPU-derived deltas with GPU captures at
+token bases 0, 3, 4, 63, 64, and 65. It covers FP16, INT8, Q4_0 and K8V4,
+main and draft K/V, page boundaries, pooled rows, and checkpoint stamps.
+The nine focused cache and snapshot tests pass.
+The wider selected suite has 108 passes and two GPU-instruction skips.
+The three known failures listed in the CPU and SSD study are excluded.
+Do not report this as a complete-suite pass.
+
+The active-burst check grows K/V to 32,768 cells on both GPUs.
+After a 30.2-second pause, a small request trims it to 8,192 cells.
+The expert caches refill 40 and 64 slots. A following image request
+identifies a generated solid-red image as `Red`.
+
+The installed service survives a restart and restores a 4,551-token
+root from production NVMe. A later chat returns through that root in
+RAM. The final image request answers `Red`, with 55 speculative drafts
+offered and 28 accepted. Disk counters show one restore, zero corruptions,
+and zero write failures in that service instance.
+
+The service keeps context 524,288, INT8 KV, MTP window 8 and minimum
+probability 0.70, image support, L2 15,360 MiB with 32 slots, and L3
+50 GiB. The PLE table stays NVMe-backed. No private configuration is
+changed. Linux/CUDA dual-V100 behavior is exercised. Windows and HIP
+behavior is not exercised.
+
+The installed engine has SHA-256
+`60bbd54e873245b350bfc95b3b1df9550e16c69523e86eb92deba4330552deaf`.
+The earlier installed engine is saved outside the repository.
+Remove the owned NVMe test stores after measurement.
+The verified modified user service is running after the checks.
+
+The existing [measurement file](../bench/results/2026-10-10-v100-cpu-ssd/measurements.json)
+contains the numeric request records, cache transitions, and service proof.
+

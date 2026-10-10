@@ -195,6 +195,7 @@ public:
     size_t bytes() const { return bytes_ + reuse_.bytes(); }
     size_t size() const { return entries_.size(); }
     size_t evictions() const { return evictions_; }
+    bool pinned(size_t index) const { return entries_.at(index).pinned; }
     // A parked system-prompt prefix (the chain's root) is the same ids for every chat of a client.
     bool has(const std::vector<int32_t>& ids, const std::vector<ConversationImageKey>& imgs, bool cvec) const {
         for (const auto& e : entries_)

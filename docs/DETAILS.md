@@ -614,6 +614,11 @@ RTX 5070, against ~3 tokens/s before these changes.
   K/V pools and expert cache. This option requires VMM support on each GPU, an expert profile, GPU-only K/V
   (no KV streaming), and all experts in RAM (not the resident low-RAM mode). It does not support remote experts,
   `--batch`, `--vram-elastic`, or `--peer-device`. The engine reports when these conditions disable the option.
+  During an active series of requests, keep a recent K/V target of at most 65,536 cells.
+  After 30 seconds without a completed request, return surplus K/V memory to the expert cache.
+  The current request can still use the full logical context. Vision and reserve-pressure paths
+  can reclaim memory immediately. This rule avoids repeated shrink, expert refill, and growth
+  operations between short chat switches. The existing trim hysteresis still applies.
 - `--host-core last` (or `STRATA_HOST_CORE=last`, Windows): the host thread runs on the last physical core and the
   workers take the first. Windows sends a GPU's interrupts to the first core, where a host spinning on the GPU's flags
   waits for them (`--host-core first` is the default; the startup log names the cores).
@@ -1300,8 +1305,8 @@ Add `--conversation-cache-disk strata-conversations --conversation-cache-disk-gi
 engine arguments. The engine then keeps parked conversations as files in the
 `strata-conversations` directory, and a restarted server can resume them. The path and a
 positive GiB budget are required together. The store is off by default, it needs `--serve`,
-and it works with `--conversation-cache-mib 0`. It accepts `--layer-split`; the RAM cache
-rejects that flag. The engine creates the directory when it is absent. A store that cannot be
+and it works with `--conversation-cache-mib 0`. Both the disk and RAM caches
+support `--layer-split`. The engine creates the directory when it is absent. A store that cannot be
 created stops startup with an error.
 
 Two optional flags tune the store. `--conversation-cache-disk-slots N` caps the number of
@@ -1321,6 +1326,19 @@ strictly longer than each available resident prefix. An equal-length RAM
 match uses L2, not L3. An equal-length live or idle-slot match stays resident.
 L3 can still supply a longer prefix, or restore a conversation after L2 eviction.
 No client session ID is needed.
+
+When a validated disk root is restored, the engine can retain its existing host
+image in L2. The RAM slot limit, byte budget, physical-RAM floor, and root setting
+still apply. The engine does not capture the root from the GPU again.
+A later RAM restore keeps the pinned root available for another chat.
+Only token and image identity metadata is copied into the active session.
+The cached K/V buffers remain separate from active reuse buffers.
+
+When both tiers park an outgoing conversation, L3 can derive its new tail from
+the L2 image. This avoids a second GPU read-back. The disk writer still owns its
+payload. A lookup, a store change, or another park waits for the pending writer
+before it accesses the store. A continuation that already has the full useful
+resident prefix does not wait for a disk lookup that cannot improve reuse.
 
 **The shared system prompt (captured once).** When a fresh chat's prompt is read from token 0, the engine
 checkpoints the end of the system prompt (the first turn boundary) if that is `--prompt-cache-root` tokens

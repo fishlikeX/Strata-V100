@@ -57,6 +57,13 @@ inline bool ram_reuse_wins(int64_t ram_tokens, int64_t resume, int64_t slot_toke
     return ram_tokens > (resume > slot_tokens ? resume : slot_tokens);
 }
 
+/// Keep a bounded K/V high-water mark during an active burst of short chat switches.
+/// After 30 seconds without a completed request, return surplus VRAM to the expert cache.
+inline int64_t retained_kv_cells(int64_t required, int64_t recent, int64_t idle_ms) {
+    const int64_t keep = idle_ms < 30000 ? (recent < 65536 ? recent : 65536) : 0;
+    return required > keep ? required : keep;
+}
+
 /// --prompt-cache-tail: the extra checkpoint near the prompt's end (`tail[i]`) is the first to go - it serves
 /// only a branch of the last request - unless it is the newest item (the one just saved: `n > 1` and the newest
 /// stamp).  With no such item this is the plain policy.  Never the root.

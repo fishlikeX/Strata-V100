@@ -117,3 +117,12 @@ See the [release selection](../improvements/RELEASE-v0.1.41-V100.md)
 and [prefill/decode measurements](../benchmarks/v100-iq3_s-v0141-2026-10-08.md).
 The options do not change an installed service until its environment and
 engine are changed. Do not enable stage-buffer pinning for IQ3_S.
+
+## Shared-root return latency
+
+The dual-V100 protected study measures repeat shared-root HTTP latency
+at 1,799.7 ms before the cache changes and 902.6 ms after them.
+The engine retains a disk-restored root in the bounded RAM cache.
+The unrelated small-chat and live-continuation cases do not improve
+in this sample. Do not treat this result as a general throughput gain.
+See the [agentic latency measurements](../benchmarks/v100-iq3_s-prefill-wmma.md#agentic-short-turn-latency-2026-10-10).

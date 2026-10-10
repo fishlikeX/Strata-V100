@@ -229,7 +229,19 @@ already reads chunk c+1. Conversation checkpoints save and restore every card's 
 into the card that owns the layer.
 
 The opt-in conversation cache disk store (`--conversation-cache-disk`) saves that state in files: one record per
-conversation, with one image per stage. It accepts `--layer-split`, unlike the host-RAM conversation cache.
+conversation, with one image per stage. Both the disk and host-RAM caches support `--layer-split`.
+
+A validated shared root restored from disk can retain all stage images
+in the bounded RAM cache. Each stage is validated before restore.
+The draft K/V stays with the last stage. A later RAM restore keeps
+the pinned root for another chat. The RAM budget, slot limit, and
+physical-RAM floor still apply.
+
+When both tiers park a conversation, the disk delta can use the existing
+RAM snapshot instead of another GPU read-back. Each disk payload keeps
+its own storage. Store accesses still wait for the pending writer.
+The measured [dual-V100 shared-root study](../benchmarks/v100-iq3_s-prefill-wmma.md#agentic-short-turn-latency-2026-10-10)
+reports the gains and the cases that do not improve.
 
 ## Limits (for now)
 

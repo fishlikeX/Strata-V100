@@ -93,6 +93,10 @@ bool conversation_disk_delta_bytes(const ConversationView& view, const SessionSt
 bool conversation_disk_delta_save(SavedConversation& out, const ConversationView& view,
                                   const SessionState& session, const ModelGeometry& g,
                                   const QsaState* draft, int64_t first_token, std::string& error);
+// Build the same disk delta from an already captured stage image, without another GPU read-back.
+// The source must be a full image; the final K/V layer is the draft only when has_draft is true.
+bool conversation_disk_delta_from_snapshot(SavedConversation& out, const SavedConversation& image,
+                                           int64_t first_token, bool has_draft, std::string& error);
 bool conversation_snapshot_bytes(const ConversationView& view, const SessionState& session,
                                  const ModelGeometry& g, const QsaState& draft, size_t& bytes, std::string& error);
 bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const ConversationView& view,
