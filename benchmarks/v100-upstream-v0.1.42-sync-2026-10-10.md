@@ -33,9 +33,16 @@ v0.1.42 commit.
 
 ## Conflict set
 
-The merge changed 2,275 files against the fork's `main`. The upstream delta
-adds 2,021 files. 263 files were modified on both sides and 35 of them
-conflicted.
+The merge changed 2,275 files against the fork's `main`. 263 files were
+modified on both sides and 35 of them conflicted.
+
+1,863 of those files are upstream's own `bench/` additions: 1,860 community
+benchmark records (393,478 lines) and three bench tools. They are removed
+again by the last commit of this branch, so the tree under `bench/` is
+identical to `main` and the pull request does not touch `bench/`.
+
+The pull request therefore changes 412 files (+65,597 / -4,336): 256 modified
+and 156 new upstream files.
 
 The 35 files are: CMakeLists.txt, 4 documents, 4 serve files, 3 web files,
 2 tools, 10 headers, 8 CUDA and CPU kernel files, 2 prefill files,
@@ -169,6 +176,6 @@ reads files, so the fork's behavior is unchanged for a mapped pack.
   prompt. A decode rate over different output lengths is not a comparison.
 * The comparison uses one prompt per length per repeat, three repeats. The
   per-prompt spread is larger than the mean difference.
-* The upstream delta adds 2,021 files, most of them community benchmark
-  records. They are not reviewed here.
+* Upstream's `bench/` records for other people's hardware are excluded from
+  the pull request. They are not reviewed here.
 * No long-context, vision or conversation-cache test was run.
