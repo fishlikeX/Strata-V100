@@ -4735,7 +4735,10 @@ int main(int argc, char** argv) {
             // Slot b's drafter lives where the solo drafter does (the guard above: the last stage's GPU), carved from the
             // LAST stage's slot-b session (bslot_ss.back(): stage 0's on one GPU): it borrows that session's context
             // length and RoPE table, which are on that device.  Its PLE history is the first stage's slot session: PLE
-            // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+            // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).  The solo load runs
+            // under on_mtp (the last stage's device); this loop needs the same guard or load() records the wrong
+            // device_ and the shared-weights check refuses it under a layer split.
+            const strata::core::OnDevice on_batch_mtp(last_st ? last_st->dev : -1);
             for (int b = 0; b < o.batch; ++b) {
                 auto d = std::make_unique<strata::core::MtpDrafter>();
                 if (!d->load(o.mtp, draft_geometry, *bslot_ss.back()[(size_t) b], o.spec, err, o.mtp_window, &mtp)) {
