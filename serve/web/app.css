@@ -173,6 +173,12 @@ main { flex: 1; min-height: 0; display: flex; }
 .req-head__tools { display: flex; align-items: center; gap: var(--st-s-3); }
 .req-head__tools .st-btn { height: 32px; padding: 0 12px; font-size: var(--st-fs-sm); }
 .table-wrap { overflow-x: auto; }
+/* Recent requests: keep headings, values and status badges on one line. */
+#req-wrap .st-table th,
+#req-wrap .st-table td {
+  white-space: nowrap;
+  padding-inline: 8px;
+}
 .table-wrap.all { max-height: 420px; overflow-y: auto; }
 .req-card .st-table th, .req-card .st-table td { padding: 9px 10px; white-space: nowrap; }
 .req-totals { margin: 0; font-size: var(--st-fs-sm); }

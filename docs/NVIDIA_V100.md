@@ -35,6 +35,15 @@ select "old" kernels everywhere: which kernel runs is decided per architecture w
 | QSA prompt attention, Q4_0 KV | the decode kernel |
 | QSA block scores | the warp kernel (the tensor-core scorer needs sm_80) |
 
+| Part of a decode / verify window | On sm_70 |
+| --- | --- |
+| Routed experts in VRAM | gfx906's expert mode 8: the codebook grid and the group's activations in shared memory, SwiGLU fused (`STRATA_EXP_MODE=0`: the CUDA layout other cards run) |
+| Dense 2-4 column GEMVs and the head | the interleaved `native_mmvq_il` with a Volta rows table (`STRATA_MMVQ_IL=0`: `native_mmvq`) |
+| Hyper-connection read, up projection | gfx906's latency-hidden up kernel (`STRATA_GR_FAST=0`: the plain one) |
+
+All three are bitwise the kernels they replace; on a V100-SXM2 they take a verify window's GPU work from 22.8 to 21.2 ms
+([bench/results/2026-10-07-v100-decode-kernels](../bench/results/2026-10-07-v100-decode-kernels/README.md)).
+
 ## Measured
 
 One V100-PCIE-32GB, i9-7960X, Unsloth `UD-IQ4_XS` (not a setup model), int8 KV, MTP `--spec 2`; prompt read speed of random-word prompts, tokens/s,
@@ -66,7 +75,10 @@ sm_80.
 ## Limits
 
 - A layer split over two V100 was not measured with this kernel. The cards work in turn on a single request, so a split adds expert-cache room, not prompt speed.
-- sm_60 (Pascal) is covered by the same flag but was not measured here.
+- sm_60 (Pascal) is covered by the same flag, and community runs exist: two Tesla P40 with a layer split (#1028, bench
+  [2026-10-05-community-2x-p40](../bench/results/2026-10-05-community-2x-p40/README.md)), a Tesla P100 alone and with an RTX 2070 SUPER as
+  the expert-helper card (#1069: 30.5 tok/s alone, 35.8-38.4 with the helper), and a V100 + P100 pair (#1079: +6-11% decode from 0.1.39 to
+  0.1.40 with the P100 as helper cache). One reporter's numbers each; this page's own kernel measurements are V100 only.
 - Volta's tensor cores take FP16 only: a model's BF16 weights are converted, and a weight outside FP16's range would saturate (none did in
   the check above).
 
@@ -74,9 +86,14 @@ sm_80.
 
 Set `STRATA_SM70_TABLE=1` to select the interleaved dense-matvec table,
 native expert mode 8, and latency-hidden HC up projection on Volta.
-The individual settings `STRATA_MMVQ_IL`, `STRATA_EXP_MODE`, and
-`STRATA_GR_FAST` take precedence. Without the master setting, Volta retains
-the previous decode selection.
+The interleaved 2-4 column matvec with a Volta rows table and the
+latency-hidden norm/up are bitwise the default kernels' output (GPU work
+per verify window 22.8 -> 21.2 ms on a V100-SXM2 in the contributor's
+measurement); they become the default once the contributor has confirmed
+them on a V100 with the 0.1.41 code. The individual settings
+`STRATA_MMVQ_IL`, `STRATA_EXP_MODE`, and `STRATA_GR_FAST` take precedence.
+Without the master setting, Volta retains the previous decode selection
+(what 0.1.40.3 ran).
 
 Set `STRATA_EMB_REUSE_ACCOUNT=1` to let the prompt planner use the embedding
 buffer space reused by half outputs. Default accounting remains conservative.

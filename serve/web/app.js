@@ -135,7 +135,7 @@ const reqPrefill = (r) => (r && r.prompt_ms > 0 ? Math.max(0, (r.prompt_tokens |
 function sparkPaths(values, max) {
   const v = (values || []).map((x) => (x == null ? 0 : x));
   if (v.length < 2) return {line: "", area: ""};
-  const top = Math.max(max || 0, ...v, 1e-9);
+  const top = Math.max(max || 0, ...v, 1);
   const pts = v.map((x, i) => [(i / (v.length - 1)) * 100, 30 - (x / top) * 26]);
   const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join("");
   return {line, area: `${line}L100,32L0,32Z`};
@@ -602,7 +602,7 @@ function renderAbout(eng, hw, st) {
     ["Experimental speed projection", projectionText(eng.cvec)],
   ]);
   facts($("facts-hw"), [
-    ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : "not readable (NVML)"],
+    ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : (st.gpu_note || "not readable (NVML)")],
     ["CPU", st.cpu_name ? `${st.cpu_name}${st.threads ? `, ${st.threads} threads` : ""}` : null],
     ["RAM", hw.ram_total ? `${gb(hw.ram_total, 0)} GB` : null],
   ]);
@@ -949,7 +949,7 @@ function apiMessages() {
       const text = userText(m);
       out.push({role: "user", content: imgs.length ? [{type: "text", text},
         ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : text});
-    } else if (!m.error) {
+    } else if (!(busy && busy.msg === m)) {            // the answer being asked for now is not history yet
       out.push(...assistantMessages(m));
     }
   }
@@ -959,7 +959,14 @@ function apiMessages() {
 // their results (as the model read them), then the rest - so the next question can build on what the tools found.
 function assistantMessages(m) {
   const ran = (m.tools || []).filter((t) => t.round != null && t.result != null && t.state !== "skipped");
-  if (!ran.length) return m.text ? [{role: "assistant", content: m.text}] : [];
+  // #1392: a turn with no answer text (only reasoning, a stop before the first content token, or an error) still goes
+  // back as an assistant turn, so the history keeps alternating and a reasoning model sees that it already answered.
+  // The server leaves such a turn out of the prompt itself (serve/frontend.py, #843); reasoning_content rides along.
+  if (!ran.length) {
+    const msg = {role: "assistant", content: m.text || ""};
+    if (!m.text && m.reasoning) msg.reasoning_content = m.reasoning;
+    return [msg];
+  }
   const out = [];
   let pos = 0;
   for (const r of [...new Set(ran.map((t) => t.round))]) {
