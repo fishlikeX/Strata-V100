@@ -37,7 +37,7 @@ namespace strata::kernels {
 STRATA_HD inline uint16_t f16_from_f32(float f) {
     uint32_t x;
 #if defined(__HIP_DEVICE_COMPILE__)
-    __builtin_memcpy(&x, &f, 4);
+    memcpy(&x, &f, 4);
 #else
     std::memcpy(&x, &f, 4);
 #endif
@@ -94,7 +94,7 @@ STRATA_HD inline float f32_from_f16(uint16_t h) {
     }
     float f;
 #if defined(__HIP_DEVICE_COMPILE__)
-    __builtin_memcpy(&f, &out, 4);
+    memcpy(&f, &out, 4);
 #else
     std::memcpy(&f, &out, 4);
 #endif

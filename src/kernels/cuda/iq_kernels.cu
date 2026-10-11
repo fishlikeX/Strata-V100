@@ -17,6 +17,7 @@
 #include "ggml-common.h"
 
 #include <cstdio>
+#include <cstring>
 #include <utility>
 #include <cstdlib>
 #include <type_traits>
@@ -3845,7 +3846,7 @@ __global__ void __launch_bounds__(WG_THREADS, DEC == 1 ? 2 : 1) gemm_iq_f16_grou
             const uint32_t table01 = (d ^ 0x8000u) | (z << 16);
             const uint32_t table23 = d | (twice << 16);
             uint4 q4;
-            __builtin_memcpy(&q4, b->qs, 16);
+            memcpy(&q4, b->qs, 16);
             const uint8_t* qb = reinterpret_cast<const uint8_t*>(&q4);
             __half* o = sw + r * LDW + blk * 64;
 #pragma unroll
@@ -3869,7 +3870,7 @@ __global__ void __launch_bounds__(WG_THREADS, DEC == 1 ? 2 : 1) gemm_iq_f16_grou
 #pragma unroll
                 for (int j = 0; j < 16; j += 2) {
                     uint16_t q;
-                    __builtin_memcpy(&q, qs + j, sizeof(q));
+                    memcpy(&q, qs + j, sizeof(q));
                     const __half2 lo = __floats2half2_rn((float) grid8[q & 0xf], (float) grid8[(q >> 8) & 0xf]);
                     const __half2 hi = __floats2half2_rn((float) grid8[(q >> 4) & 0xf], (float) grid8[q >> 12]);
                     *reinterpret_cast<__half2*>(o + 32 * blk + j) = __hmul2(d, lo);

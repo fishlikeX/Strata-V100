@@ -114,14 +114,14 @@ __global__ void gemm_wmma_16x16_1w(
         vec_t a_frag, b_frag;
 
         if (m_row < T) {
-            __builtin_memcpy(&a_frag, X + (int64_t)m_row * K + k_tile, sizeof(a_frag));
+            memcpy(&a_frag, X + (int64_t)m_row * K + k_tile, sizeof(a_frag));
         } else {
             #pragma unroll
             for (int i = 0; i < 16; ++i) a_frag[i] = 0;
         }
 
         if (n_row < N) {
-            __builtin_memcpy(&b_frag, W + (int64_t)n_row * K + k_tile, sizeof(b_frag));
+            memcpy(&b_frag, W + (int64_t)n_row * K + k_tile, sizeof(b_frag));
         } else {
             #pragma unroll
             for (int i = 0; i < 16; ++i) b_frag[i] = 0;
@@ -213,7 +213,7 @@ __global__ void gemm_wmma_64x64_4w(
         // Load A fragment from X for current wave's 16 M-rows
         vec_t a_frag;
         if (m_row < T) {
-            __builtin_memcpy(&a_frag, X + (int64_t)m_row * K + k_tile, sizeof(a_frag));
+            memcpy(&a_frag, X + (int64_t)m_row * K + k_tile, sizeof(a_frag));
         } else {
             #pragma unroll
             for (int i = 0; i < 16; ++i) a_frag[i] = 0;
@@ -221,10 +221,10 @@ __global__ void gemm_wmma_64x64_4w(
 
         // Read B fragments from LDS and compute WMMA
         vec_t b_frag0, b_frag1, b_frag2, b_frag3;
-        __builtin_memcpy(&b_frag0, &b_lds[cur_buf][0 + lane_lo][0], sizeof(vec_t));
-        __builtin_memcpy(&b_frag1, &b_lds[cur_buf][16 + lane_lo][0], sizeof(vec_t));
-        __builtin_memcpy(&b_frag2, &b_lds[cur_buf][32 + lane_lo][0], sizeof(vec_t));
-        __builtin_memcpy(&b_frag3, &b_lds[cur_buf][48 + lane_lo][0], sizeof(vec_t));
+        memcpy(&b_frag0, &b_lds[cur_buf][0 + lane_lo][0], sizeof(vec_t));
+        memcpy(&b_frag1, &b_lds[cur_buf][16 + lane_lo][0], sizeof(vec_t));
+        memcpy(&b_frag2, &b_lds[cur_buf][32 + lane_lo][0], sizeof(vec_t));
+        memcpy(&b_frag3, &b_lds[cur_buf][48 + lane_lo][0], sizeof(vec_t));
 
         c_acc0 = WmmaTraits<ElemT>::mma(a_frag, b_frag0, c_acc0);
         c_acc1 = WmmaTraits<ElemT>::mma(a_frag, b_frag1, c_acc1);
